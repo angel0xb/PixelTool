@@ -22,10 +22,65 @@ struct ImageDoc: Identifiable, Hashable {
     var displaySize: CGSize
     /// Per-image overlay opacity (only used in overlay mode)
     var overlayOpacity: Double = 1.0
+    /// Position for drag-to-move functionality
+    var position: CGPoint = .zero
     
     var aspectRatio: CGFloat {
         let s = original.size
         return s.height == 0 ? 1 : s.width / s.height
+    }
+}
+
+// Persistent model for history items
+struct PersistentImageDoc: Codable {
+    let url: URL?
+    let name: String
+    let displaySize: CGSize
+    let originalSize: CGSize
+    let lastAccessed: Date
+    let imageData: Data? // Store the actual image data
+    
+    init(from doc: ImageDoc) {
+        self.url = doc.url
+        self.name = doc.name
+        self.displaySize = doc.displaySize
+        self.originalSize = doc.original.size
+        self.lastAccessed = Date()
+        
+        // Try to get image data from the original image
+        if let tiffData = doc.original.tiffRepresentation {
+            self.imageData = tiffData
+        } else {
+            self.imageData = nil
+        }
+    }
+    
+    func toImageDoc() -> ImageDoc? {
+        var image: NSImage?
+        
+        // First try to load from stored image data
+        if let data = imageData {
+            image = NSImage(data: data)
+        }
+        
+        // If that fails and we have a URL, try loading from URL
+        if image == nil, let url = url {
+            image = NSImage(contentsOf: url)
+        }
+        
+        // If we still can't load the image, return nil
+        guard let img = image else { 
+            print("Failed to load image from both data and URL: \(name)")
+            return nil 
+        }
+        
+        return ImageDoc(
+            url: url,
+            name: name,
+            original: img,
+            displaySize: displaySize,
+            position: CGPoint(x: 400, y: 300)
+        )
     }
 }
 
@@ -37,6 +92,11 @@ final class ImageWorkbench: ObservableObject {
     @Published var focusedID: ImageDoc.ID? = nil
     @Published var layout: LayoutMode = .sideBySide
     @Published var keepAspect = true
+    @Published var history: [ImageDoc] = []
+    
+    init() {
+        loadHistory()
+    }
     
     enum LayoutMode: String, CaseIterable, Identifiable {
         case sideBySide = "Side by side"
@@ -64,7 +124,10 @@ final class ImageWorkbench: ObservableObject {
             if let img = NSImage(contentsOf: url) {
                 let s = img.size
                 let start = CGSize(width: min(800, s.width), height: min(800 * (s.height / max(s.width, 1)), s.height))
-                newDocs.append(ImageDoc(url: url, name: url.lastPathComponent, original: img, displaySize: start))
+                let centerPosition = CGPoint(x: 400, y: 300) // Default center position
+                let doc = ImageDoc(url: url, name: url.lastPathComponent, original: img, displaySize: start, position: centerPosition)
+                newDocs.append(doc)
+                addToHistory(doc)
             }
         }
         if !newDocs.isEmpty {
@@ -82,8 +145,10 @@ final class ImageWorkbench: ObservableObject {
                     Task { @MainActor in
                         let s = img.size
                         let start = CGSize(width: min(800, s.width), height: min(800 * (s.height / max(s.width, 1)), s.height))
-                        let doc = ImageDoc(url: nil, name: "Dropped Image", original: img, displaySize: start)
+                        let centerPosition = CGPoint(x: 400, y: 300) // Default center position
+                        let doc = ImageDoc(url: nil, name: "Dropped Image", original: img, displaySize: start, position: centerPosition)
                         self.docs.append(doc)
+                        self.addToHistory(doc)
                         if self.focusedID == nil { self.focusedID = doc.id }
                     }
                 }
@@ -126,6 +191,19 @@ final class ImageWorkbench: ObservableObject {
     func focus(_ id: ImageDoc.ID) { focusedID = id }
     func isFocused(_ doc: ImageDoc) -> Bool { focusedID == doc.id }
     
+    // MARK: Close functionality
+    func closeImage(_ id: ImageDoc.ID) {
+        docs.removeAll { $0.id == id }
+        if focusedID == id {
+            focusedID = docs.first?.id
+        }
+    }
+    
+    func closeAllImages() {
+        docs.removeAll()
+        focusedID = nil
+    }
+    
     // MARK: Size updates
     func updateSize(for id: ImageDoc.ID, width: CGFloat? = nil, height: CGFloat? = nil) {
         guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
@@ -151,6 +229,206 @@ final class ImageWorkbench: ObservableObject {
     func setOpacity(for id: ImageDoc.ID, _ value: Double) {
         guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
         docs[idx].overlayOpacity = value
+    }
+    
+    // MARK: Position updates
+    func updatePosition(for id: ImageDoc.ID, _ position: CGPoint) {
+        guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
+        docs[idx].position = position
+    }
+    
+    // MARK: Corner resize
+    func cornerResize(for id: ImageDoc.ID, corner: ResizeCorner, delta: CGSize) {
+        guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
+        var doc = docs[idx]
+        var newSize = doc.displaySize
+        
+        switch corner {
+        case .topLeft:
+            newSize.width = max(50, newSize.width - delta.width)
+            newSize.height = max(50, newSize.height - delta.height)
+        case .topRight:
+            newSize.width = max(50, newSize.width + delta.width)
+            newSize.height = max(50, newSize.height - delta.height)
+        case .bottomLeft:
+            newSize.width = max(50, newSize.width - delta.width)
+            newSize.height = max(50, newSize.height + delta.height)
+        case .bottomRight:
+            newSize.width = max(50, newSize.width + delta.width)
+            newSize.height = max(50, newSize.height + delta.height)
+        }
+        
+        if keepAspect {
+            let ar = doc.aspectRatio
+            if newSize.width / max(newSize.height, 1) > ar {
+                newSize.width = newSize.height * ar
+            } else {
+                newSize.height = newSize.width / max(ar, 0.0001)
+            }
+        }
+        
+        doc.displaySize = newSize
+        docs[idx] = doc
+    }
+    
+    func resetPosition(for id: ImageDoc.ID) {
+        guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
+        docs[idx].position = CGPoint(x: 400, y: 300) // Reset to center
+    }
+    
+    // MARK: History management
+    func addToHistory(_ doc: ImageDoc) {
+        print("Adding to history: \(doc.name)")
+        
+        // Remove any existing instance of this image (by URL or name if no URL)
+        let initialCount = history.count
+        history.removeAll { existingDoc in
+            if let docURL = doc.url, let existingURL = existingDoc.url {
+                return docURL == existingURL
+            } else {
+                return doc.name == existingDoc.name
+            }
+        }
+        
+        if history.count < initialCount {
+            print("Removed duplicate from history")
+        }
+        
+        // Add to beginning of history
+        history.insert(doc, at: 0)
+        
+        // Keep only last 11 items
+        if history.count > 11 {
+            history = Array(history.prefix(11))
+        }
+        
+        print("History now has \(history.count) items")
+        
+        // Save to persistent storage
+        saveHistory()
+    }
+    
+    func openFromHistory(_ doc: ImageDoc) {
+        // Check if this image is already open
+        let isAlreadyOpen = docs.contains { existingDoc in
+            if let docURL = doc.url, let existingURL = existingDoc.url {
+                return docURL == existingURL
+            } else {
+                return doc.name == existingDoc.name
+            }
+        }
+        
+        if !isAlreadyOpen {
+            // Create a new instance with current timestamp
+            let newDoc = ImageDoc(
+                url: doc.url,
+                name: doc.name,
+                original: doc.original,
+                displaySize: doc.displaySize,
+                position: CGPoint(x: 400, y: 300)
+            )
+            docs.append(newDoc)
+            focusedID = newDoc.id
+        } else {
+            // Focus the existing image
+            if let existingDoc = docs.first(where: { existingDoc in
+                if let docURL = doc.url, let existingURL = existingDoc.url {
+                    return docURL == existingURL
+                } else {
+                    return doc.name == existingDoc.name
+                }
+            }) {
+                focusedID = existingDoc.id
+            }
+        }
+    }
+    
+    func clearHistory() {
+        history.removeAll()
+        saveHistory()
+    }
+    
+    // MARK: Persistence
+    private let historyKey = "com.pixeltool.imageresize.history"
+    
+    func saveHistory() {
+        print("Saving \(history.count) items to history...")
+        print("Using key: \(historyKey)")
+        let persistentDocs = history.map { PersistentImageDoc(from: $0) }
+        if let data = try? JSONEncoder().encode(persistentDocs) {
+            UserDefaults.standard.set(data, forKey: historyKey)
+            UserDefaults.standard.synchronize() // Force sync
+            print("Successfully saved history to UserDefaults")
+            print("Data size: \(data.count) bytes")
+        } else {
+            print("Failed to encode history data")
+        }
+    }
+    
+    func loadHistory() {
+        print("Loading history from UserDefaults...")
+        print("Using key: \(historyKey)")
+        
+        guard let data = UserDefaults.standard.data(forKey: historyKey) else {
+            print("No history data found in UserDefaults")
+            print("Available keys: \(UserDefaults.standard.dictionaryRepresentation().keys.filter { $0.contains("history") || $0.contains("Image") })")
+            return
+        }
+        
+        guard let persistentDocs = try? JSONDecoder().decode([PersistentImageDoc].self, from: data) else {
+            print("Failed to decode history data")
+            return
+        }
+        
+        print("Found \(persistentDocs.count) persistent docs")
+        
+        // Convert persistent docs back to ImageDocs, filtering out any that can't be loaded
+        let loadedDocs = persistentDocs.compactMap { persistentDoc in
+            let imageDoc = persistentDoc.toImageDoc()
+            if imageDoc == nil {
+                print("Failed to load image: \(persistentDoc.name)")
+            }
+            return imageDoc
+        }
+        
+        print("Successfully loaded \(loadedDocs.count) images")
+        
+        // Sort by last accessed date (most recent first)
+        let sortedDocs = loadedDocs.sorted { doc1, doc2 in
+            // Since we don't have access to the original lastAccessed date in ImageDoc,
+            // we'll maintain the order from the persistent storage
+            return true
+        }
+        
+        history = Array(sortedDocs.prefix(11)) // Keep only last 11
+        print("Set history to \(history.count) items")
+        
+        // Save the cleaned history (removes any items that couldn't be loaded)
+        if loadedDocs.count != persistentDocs.count {
+            print("Cleaning up history - removing \(persistentDocs.count - loadedDocs.count) invalid items")
+            saveHistory()
+        }
+    }
+    
+    func cleanupHistory() {
+        // Remove any history items that can't be loaded (files moved/deleted)
+        let validHistory = history.compactMap { doc in
+            if let url = doc.url {
+                // Check if file still exists
+                return FileManager.default.fileExists(atPath: url.path) ? doc : nil
+            }
+            return doc // Keep items without URLs (like dropped images)
+        }
+        
+        if validHistory.count != history.count {
+            history = validHistory
+            saveHistory()
+        }
+    }
+    
+    
+    enum ResizeCorner {
+        case topLeft, topRight, bottomLeft, bottomRight
     }
 }
 
@@ -200,9 +478,46 @@ struct Sidebar: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
+                        Button {
+                            vm.closeImage(doc.id)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .opacity(0.7)
                     }
                     .tag(doc.id)
                     .contentShape(Rectangle())
+                }
+            }
+            
+            if !vm.history.isEmpty {
+                Section("Recent") {
+                    ForEach(vm.history) { doc in
+                        HStack {
+                            Thumbnail(image: doc.original)
+                            VStack(alignment: .leading) {
+                                Text(doc.name).lineLimit(1)
+                                Text("\(Int(doc.original.size.width))×\(Int(doc.original.size.height))")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            vm.openFromHistory(doc)
+                        }
+                        .contextMenu {
+                            Button("Open") {
+                                vm.openFromHistory(doc)
+                            }
+                            Button("Remove from History") {
+                                vm.history.removeAll { $0.id == doc.id }
+                            }
+                        }
+                    }
                 }
             }
             
@@ -246,6 +561,20 @@ struct ToolbarBar: View {
             Toggle("Lock aspect", isOn: $vm.keepAspect)
                 .toggleStyle(.switch)
             Spacer()
+            if !vm.docs.isEmpty {
+                Button {
+                    vm.closeAllImages()
+                } label: {
+                    Label("Close All", systemImage: "xmark.circle")
+                }
+            }
+            if !vm.history.isEmpty {
+                Button {
+                    vm.clearHistory()
+                } label: {
+                    Label("Clear History", systemImage: "clock.arrow.circlepath")
+                }
+            }
             if vm.focusedID != nil {
                 Menu {
                     Button("PNG") { vm.saveFocused(as: .png) }
@@ -273,8 +602,13 @@ struct CanvasArea: View {
             case .overlay:
                 GeometryReader { geo in
                     ZStack {
-                        ForEach(vm.docs) { doc in
-                            FocusableImage(doc: doc, maxSize: geo.size)
+                        ForEach(vm.docs.sorted { doc1, doc2 in
+                            // Put focused image last (on top)
+                            if vm.isFocused(doc1) { return false }
+                            if vm.isFocused(doc2) { return true }
+                            return false
+                        }) { doc in
+                            DraggableResizableImage(doc: doc, maxSize: geo.size)
                                 .opacity(doc.overlayOpacity)
                         }
                     }
@@ -283,6 +617,7 @@ struct CanvasArea: View {
             }
         }
         .animation(.default, value: vm.layout)
+        .animation(.none, value: vm.docs.map { $0.position })
     }
 }
 
@@ -292,10 +627,10 @@ struct FlowGrid: View {
     let docs: [ImageDoc]
     
     var body: some View {
-        let columns = [
-            GridItem(.adaptive(minimum: 260), spacing: 16)
+        let rows = [
+            GridItem(.adaptive(minimum: 300), spacing: 16)
         ]
-        LazyVGrid(columns: columns, spacing: 16) {
+        LazyHGrid(rows: rows, spacing: 16) {
             ForEach(docs) { doc in
                 VStack {
                     FocusableImage(doc: doc, maxSize: CGSize(width: 600, height: 600))
@@ -355,6 +690,7 @@ struct FocusableImage: View {
             )
             .contextMenu {
                 Button("Focus") { vm.focus(doc.id) }
+                Button("Close") { vm.closeImage(doc.id) }
                 if vm.layout == .overlay {
                     Slider(value: Binding(
                         get: { doc.overlayOpacity },
@@ -365,6 +701,178 @@ struct FocusableImage: View {
                 }
             }
             .padding(4)
+    }
+}
+
+// A draggable and resizable image with corner handles
+struct DraggableResizableImage: View {
+    @EnvironmentObject var vm: ImageWorkbench
+    let doc: ImageDoc
+    let maxSize: CGSize
+    
+    @State private var dragOffset: CGSize = .zero
+    @State private var isDragging: Bool = false
+    @State private var isResizing: Bool = false
+    @State private var resizeCorner: ImageWorkbench.ResizeCorner? = nil
+    @State private var resizeStartSize: CGSize = .zero
+    @State private var resizeStartPosition: CGPoint = .zero
+    
+    var body: some View {
+        let isFocused = vm.isFocused(doc)
+        let currentPosition = CGPoint(
+            x: doc.position.x + dragOffset.width,
+            y: doc.position.y + dragOffset.height
+        )
+        
+        // Debug info removed to prevent publishing warnings
+        
+        return Image(nsImage: doc.original)
+            .resizable()
+            .interpolation(.high)
+            .antialiased(true)
+            .aspectRatio(contentMode: .fit)
+            .frame(width: doc.displaySize.width, height: doc.displaySize.height)
+            .onAppear {
+                print("🖼️ IMAGE FRAME DEBUG:")
+                print("  Image frame size: \(doc.displaySize)")
+                print("  Image position: \(currentPosition)")
+                print("  Image original size: \(doc.original.size)")
+                print("  ---")
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isFocused ? Color.accentColor : .clear, lineWidth: 2)
+            )
+            .overlay(
+                // Corner resize handles
+                Group {
+                    if isFocused {
+                        ForEach([ImageWorkbench.ResizeCorner.topLeft, .topRight, .bottomLeft, .bottomRight], id: \.self) { corner in
+                            ResizeHandle(corner: corner, onDragStart: {
+                                isResizing = true
+                                resizeCorner = corner
+                                resizeStartSize = doc.displaySize
+                            }, onDragChanged: { translation in
+                                if isResizing {
+                                    vm.cornerResize(for: doc.id, corner: corner, delta: translation)
+                                }
+                            }, onDragEnd: {
+                                isResizing = false
+                                resizeCorner = nil
+                            })
+                            .position(handlePosition(for: corner))
+                            .onAppear {
+                                let handlePos = handlePosition(for: corner)
+                                print("📍 HANDLE OVERLAY DEBUG - \(corner):")
+                                print("  Handle position in overlay: \(handlePos)")
+                                print("  Image center position: \(currentPosition)")
+                                print("  Expected handle screen position: (\(currentPosition.x + handlePos.x), \(currentPosition.y + handlePos.y))")
+                                print("  ---")
+                            }
+                        }
+                    }
+                }
+            )
+            .shadow(radius: isFocused ? 8 : 0)
+            .onTapGesture { vm.focus(doc.id) }
+            .gesture(
+                DragGesture(minimumDistance: 3)
+                    .onChanged { value in
+                        if !isResizing {
+                            // Only update drag offset if we're not resizing
+                            dragOffset = value.translation
+                            if !isDragging {
+                                isDragging = true
+                            }
+                        }
+                    }
+                    .onEnded { value in
+                        if !isResizing && isDragging {
+                            let newPosition = CGPoint(
+                                x: doc.position.x + value.translation.width,
+                                y: doc.position.y + value.translation.height
+                            )
+                            vm.updatePosition(for: doc.id, newPosition)
+                            dragOffset = .zero
+                            isDragging = false
+                        }
+                    }
+            )
+            .contextMenu {
+                Button("Focus") { vm.focus(doc.id) }
+                Button("Reset Position") { vm.resetPosition(for: doc.id) }
+                Button("Close") { vm.closeImage(doc.id) }
+                Slider(value: Binding(
+                    get: { doc.overlayOpacity },
+                    set: { vm.setOpacity(for: doc.id, $0) }
+                ), in: 0...1) {
+                    Text("Opacity")
+                }
+            }
+        .position(currentPosition)
+    }
+    
+    private func handlePosition(for corner: ImageWorkbench.ResizeCorner) -> CGPoint {
+        let frameSize = doc.displaySize
+        
+        // Position handles at the actual corners of the image frame
+        // Overlay coordinate system starts at (0,0) at top-left of image
+        let position: CGPoint
+        switch corner {
+        case .topLeft:
+            position = CGPoint(x: 0, y: 0)
+        case .topRight:
+            position = CGPoint(x: frameSize.width, y: 0)
+        case .bottomLeft:
+            position = CGPoint(x: 0, y: frameSize.height)
+        case .bottomRight:
+            position = CGPoint(x: frameSize.width, y: frameSize.height)
+        }
+        
+        // Debug: Print handle positioning info
+        print("🎯 HANDLE DEBUG - \(corner):")
+        print("  Frame size: \(frameSize)")
+        print("  Handle position (overlay coords): \(position)")
+        print("  Image position: \(doc.position)")
+        print("  Image original size: \(doc.original.size)")
+        print("  ---")
+        
+        return position
+    }
+}
+
+// Resize handle view
+struct ResizeHandle: View {
+    let corner: ImageWorkbench.ResizeCorner
+    let onDragStart: () -> Void
+    let onDragChanged: (CGSize) -> Void
+    let onDragEnd: () -> Void
+    
+    var body: some View {
+        Circle()
+            .fill(Color.accentColor)
+            .frame(width: 16, height: 16)
+            .overlay(
+                Circle()
+                    .stroke(Color.white, lineWidth: 2)
+            )
+            .shadow(radius: 2)
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        onDragStart()
+                        onDragChanged(value.translation)
+                    }
+                    .onEnded { _ in
+                        onDragEnd()
+                    }
+            )
+            .simultaneousGesture(
+                // Prevent the parent drag gesture from interfering
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in }
+                    .onEnded { _ in }
+            )
     }
 }
 

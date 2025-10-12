@@ -16,6 +16,9 @@ struct Image_ResizeApp: App {
             ContentView()
                 .environmentObject(vm)
                 .frame(minWidth: 900, minHeight: 600)
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                    vm.cleanupHistory()
+                }
         }
         .commands {
             CommandGroup(replacing: .newItem) { }
