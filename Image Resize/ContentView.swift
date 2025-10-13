@@ -516,6 +516,99 @@ final class ImageWorkbench: ObservableObject {
         docs[idx].position = CGPoint(x: 400, y: 300) // Reset to center
     }
     
+    // MARK: Canvas increment/decrement methods
+    func incrementCanvasSize(for id: ImageDoc.ID, edge: ResizeEdge) {
+        guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
+        var doc = docs[idx]
+        
+        // Initialize canvas size if not set
+        if doc.canvasSize == nil {
+            doc.canvasSize = doc.displaySize
+            doc.imageOffset = .zero
+        }
+        
+        var canvasSize = doc.canvasSize!
+        var imageOffset = doc.imageOffset
+        var position = doc.position
+        
+        // Increment by 1 pixel for the specified edge
+        switch edge {
+        case .top:
+            let oldHeight = canvasSize.height
+            canvasSize.height = max(50, canvasSize.height + 1)
+            let actualDelta = canvasSize.height - oldHeight
+            position.y -= actualDelta / 2
+            imageOffset.y += actualDelta
+        case .bottom:
+            let oldHeight = canvasSize.height
+            canvasSize.height = max(50, canvasSize.height + 1)
+            let actualDelta = canvasSize.height - oldHeight
+            position.y += actualDelta / 2
+        case .left:
+            let oldWidth = canvasSize.width
+            canvasSize.width = max(50, canvasSize.width + 1)
+            let actualDelta = canvasSize.width - oldWidth
+            position.x -= actualDelta / 2
+            imageOffset.x += actualDelta
+        case .right:
+            let oldWidth = canvasSize.width
+            canvasSize.width = max(50, canvasSize.width + 1)
+            let actualDelta = canvasSize.width - oldWidth
+            position.x += actualDelta / 2
+        }
+        
+        doc.canvasSize = canvasSize
+        doc.imageOffset = imageOffset
+        doc.position = position
+        docs[idx] = doc
+    }
+    
+    func decrementCanvasSize(for id: ImageDoc.ID, edge: ResizeEdge) {
+        guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
+        var doc = docs[idx]
+        
+        // Initialize canvas size if not set
+        if doc.canvasSize == nil {
+            doc.canvasSize = doc.displaySize
+            doc.imageOffset = .zero
+        }
+        
+        var canvasSize = doc.canvasSize!
+        var imageOffset = doc.imageOffset
+        var position = doc.position
+        
+        // Decrement by 1 pixel for the specified edge
+        switch edge {
+        case .top:
+            let oldHeight = canvasSize.height
+            canvasSize.height = max(50, canvasSize.height - 1)
+            let actualDelta = canvasSize.height - oldHeight
+            position.y -= actualDelta / 2
+            imageOffset.y += actualDelta
+        case .bottom:
+            let oldHeight = canvasSize.height
+            canvasSize.height = max(50, canvasSize.height - 1)
+            let actualDelta = canvasSize.height - oldHeight
+            position.y += actualDelta / 2
+        case .left:
+            let oldWidth = canvasSize.width
+            canvasSize.width = max(50, canvasSize.width - 1)
+            let actualDelta = canvasSize.width - oldWidth
+            position.x -= actualDelta / 2
+            imageOffset.x += actualDelta
+        case .right:
+            let oldWidth = canvasSize.width
+            canvasSize.width = max(50, canvasSize.width - 1)
+            let actualDelta = canvasSize.width - oldWidth
+            position.x += actualDelta / 2
+        }
+        
+        doc.canvasSize = canvasSize
+        doc.imageOffset = imageOffset
+        doc.position = position
+        docs[idx] = doc
+    }
+    
     func bakeCanvasSizesIntoDisplaySizes() {
         // When switching from canvas resize to image resize mode,
         // "bake" the canvas size into the display size by creating a new composite image
@@ -826,7 +919,7 @@ struct Sidebar: View {
                         Thumbnail(image: doc.original)
                         VStack(alignment: .leading) {
                             Text(doc.name).lineLimit(1)
-                            Text("\(Int(doc.original.size.width))×\(Int(doc.original.size.height))")
+                            Text("\(Int((doc.canvasSize?.width ?? doc.displaySize.width)))×\(Int((doc.canvasSize?.height ?? doc.displaySize.height)))")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -852,7 +945,7 @@ struct Sidebar: View {
                             Thumbnail(image: doc.original)
                             VStack(alignment: .leading) {
                                 Text(doc.name).lineLimit(1)
-                                Text("\(Int(doc.original.size.width))×\(Int(doc.original.size.height))")
+                                Text("\(Int((doc.canvasSize?.width ?? doc.displaySize.width)))×\(Int((doc.canvasSize?.height ?? doc.displaySize.height)))")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -899,63 +992,71 @@ struct Thumbnail: View {
 struct ToolbarBar: View {
     @EnvironmentObject var vm: ImageWorkbench
     var body: some View {
-        HStack(spacing: 12) {
-            Button {
-                vm.openImages()
-            } label: {
-                Label("Open", systemImage: "folder.badge.plus")
-            }
-            Picker("Layout", selection: $vm.layout) {
-                ForEach(ImageWorkbench.LayoutMode.allCases) { mode in
-                    Text(mode.rawValue).tag(mode)
+        VStack(spacing: 8) {
+            // Top row: Open button, Layout picker, Lock aspect toggle, and right-aligned controls
+            HStack(spacing: 12) {
+                Button {
+                    vm.openImages()
+                } label: {
+                    Label("Open", systemImage: "folder.badge.plus")
+                }
+                Picker("Layout", selection: $vm.layout) {
+                    ForEach(ImageWorkbench.LayoutMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Toggle("Lock aspect", isOn: $vm.keepAspect)
+                    .toggleStyle(.switch)
+                Spacer()
+                if !vm.docs.isEmpty {
+                    Button {
+                        vm.closeAllImages()
+                    } label: {
+                        Label("Close All", systemImage: "xmark.circle")
+                    }
+                }
+                if !vm.history.isEmpty {
+                    Button {
+                        vm.clearHistory()
+                    } label: {
+                        Label("Clear History", systemImage: "clock.arrow.circlepath")
+                    }
+                }
+                if !vm.docs.isEmpty {
+                    Menu {
+                        if vm.focusedID != nil {
+                            Section("Save Focused") {
+                                Button("PNG") { vm.saveFocused(as: .png) }
+                                Button("JPEG") { vm.saveFocused(as: .jpeg) }
+                            }
+                        }
+                        let modifiedCount = vm.docs.filter { $0.isModified }.count
+                        if modifiedCount > 0 {
+                            Section("Save All Modified (\(modifiedCount))") {
+                                Button("PNG") { vm.saveAllModified(as: .png) }
+                                Button("JPEG") { vm.saveAllModified(as: .jpeg) }
+                            }
+                        }
+                    } label: {
+                        Label("Save", systemImage: "square.and.arrow.down")
+                    }
                 }
             }
-            .pickerStyle(.segmented)
-            Toggle("Lock aspect", isOn: $vm.keepAspect)
-                .toggleStyle(.switch)
+            
+            // Bottom row: Overlay-specific controls (when in overlay mode)
             if vm.layout == .overlay {
-                Toggle("Canvas Resize", isOn: $vm.canvasResizeMode)
-                    .toggleStyle(.switch)
-                Toggle("Show Borders", isOn: $vm.showBorders)
-                    .toggleStyle(.switch)
-                Button {
-                    vm.restackImages()
-                } label: {
-                    Label("Restack", systemImage: "square.stack.3d.up")
-                }
-            }
-            Spacer()
-            if !vm.docs.isEmpty {
-                Button {
-                    vm.closeAllImages()
-                } label: {
-                    Label("Close All", systemImage: "xmark.circle")
-                }
-            }
-            if !vm.history.isEmpty {
-                Button {
-                    vm.clearHistory()
-                } label: {
-                    Label("Clear History", systemImage: "clock.arrow.circlepath")
-                }
-            }
-            if !vm.docs.isEmpty {
-                Menu {
-                    if vm.focusedID != nil {
-                        Section("Save Focused") {
-                            Button("PNG") { vm.saveFocused(as: .png) }
-                            Button("JPEG") { vm.saveFocused(as: .jpeg) }
-                        }
+                HStack(spacing: 12) {
+                    Toggle("Canvas Resize", isOn: $vm.canvasResizeMode)
+                        .toggleStyle(.switch)
+                    Toggle("Show Borders", isOn: $vm.showBorders)
+                        .toggleStyle(.switch)
+                    Button {
+                        vm.restackImages()
+                    } label: {
+                        Label("Restack", systemImage: "square.stack.3d.up")
                     }
-                    let modifiedCount = vm.docs.filter { $0.isModified }.count
-                    if modifiedCount > 0 {
-                        Section("Save All Modified (\(modifiedCount))") {
-                            Button("PNG") { vm.saveAllModified(as: .png) }
-                            Button("JPEG") { vm.saveAllModified(as: .jpeg) }
-                        }
-                    }
-                } label: {
-                    Label("Save", systemImage: "square.and.arrow.down")
+                    Spacer()
                 }
             }
         }
@@ -1029,7 +1130,7 @@ struct FlowGrid: View {
                     HStack {
                         Text(doc.name).font(.caption).lineLimit(1)
                         Spacer()
-                        Text("\(Int(doc.displaySize.width))×\(Int(doc.displaySize.height))")
+                        Text("\(Int((doc.canvasSize?.width ?? doc.displaySize.width)))×\(Int((doc.canvasSize?.height ?? doc.displaySize.height)))")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
@@ -1420,8 +1521,12 @@ struct Inspector: View {
             LabeledContent("Original") {
                 Text("\(Int(doc.original.size.width))×\(Int(doc.original.size.height))")
             }
-            LabeledContent("Current") {
-                Text("\(Int(doc.displaySize.width))×\(Int(doc.displaySize.height))")
+            LabeledContent(vm.canvasResizeMode && vm.layout == .overlay ? "Canvas" : "Current") {
+                if vm.canvasResizeMode && vm.layout == .overlay {
+                    Text("\(Int(doc.canvasSize?.width ?? doc.displaySize.width))×\(Int(doc.canvasSize?.height ?? doc.displaySize.height))")
+                } else {
+                    Text("\(Int(doc.displaySize.width))×\(Int(doc.displaySize.height))")
+                }
             }
             
             Toggle("Lock aspect", isOn: $vm.keepAspect)
@@ -1448,6 +1553,135 @@ struct Inspector: View {
                     }
                     width = ""; height = ""
                 }
+            }
+            
+            // Canvas resize increment/decrement buttons
+            if vm.canvasResizeMode && vm.layout == .overlay {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Canvas Size")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    
+                    // Top controls (+ on top, - below)
+                    HStack(spacing: 4) {
+                        Spacer()
+                        VStack(spacing: 2) {
+                            Button {
+                                vm.incrementCanvasSize(for: doc.id, edge: .top)
+                            } label: {
+                                Image(systemName: "plus")
+                                    .font(.caption)
+                                    .frame(width: 12, height: 12)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .frame(width: 24, height: 24)
+                            .help("Increase top by 1px")
+                            
+                            Button {
+                                vm.decrementCanvasSize(for: doc.id, edge: .top)
+                            } label: {
+                                Image(systemName: "minus")
+                                    .font(.caption)
+                                    .frame(width: 12, height: 12)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .frame(width: 24, height: 24)
+                            .help("Decrease top by 1px")
+                        }
+                        Spacer()
+                    }
+                    
+                    // Middle row with left/right controls
+                    HStack(spacing: 4) {
+                        HStack(spacing: 2) {
+                            Button {
+                                vm.incrementCanvasSize(for: doc.id, edge: .left)
+                            } label: {
+                                Image(systemName: "plus")
+                                    .font(.caption)
+                                    .frame(width: 12, height: 12)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .frame(width: 24, height: 24)
+                            .help("Increase left by 1px")
+                            
+                            Button {
+                                vm.decrementCanvasSize(for: doc.id, edge: .left)
+                            } label: {
+                                Image(systemName: "minus")
+                                    .font(.caption)
+                                    .frame(width: 12, height: 12)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .frame(width: 24, height: 24)
+                            .help("Decrease left by 1px")
+                        }
+                        
+                        Spacer()
+                        
+                        HStack(spacing: 2) {
+                            Button {
+                                vm.decrementCanvasSize(for: doc.id, edge: .right)
+                            } label: {
+                                Image(systemName: "minus")
+                                    .font(.caption)
+                                    .frame(width: 12, height: 12)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .frame(width: 24, height: 24)
+                            .help("Decrease right by 1px")
+                            
+                            Button {
+                                vm.incrementCanvasSize(for: doc.id, edge: .right)
+                            } label: {
+                                Image(systemName: "plus")
+                                    .font(.caption)
+                                    .frame(width: 12, height: 12)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .frame(width: 24, height: 24)
+                            .help("Increase right by 1px")
+                        }
+                    }
+                    
+                    // Bottom controls (- on top, + below)
+                    HStack(spacing: 4) {
+                        Spacer()
+                        VStack(spacing: 2) {
+                            Button {
+                                vm.decrementCanvasSize(for: doc.id, edge: .bottom)
+                            } label: {
+                                Image(systemName: "minus")
+                                    .font(.caption)
+                                    .frame(width: 12, height: 12)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .frame(width: 24, height: 24)
+                            .help("Decrease bottom by 1px")
+                            
+                            Button {
+                                vm.incrementCanvasSize(for: doc.id, edge: .bottom)
+                            } label: {
+                                Image(systemName: "plus")
+                                    .font(.caption)
+                                    .frame(width: 12, height: 12)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .frame(width: 24, height: 24)
+                            .help("Increase bottom by 1px")
+                        }
+                        Spacer()
+                    }
+                }
+                .padding(.vertical, 4)
             }
             
             if vm.layout == .overlay {
