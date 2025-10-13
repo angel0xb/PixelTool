@@ -1017,6 +1017,83 @@ final class ImageWorkbench: ObservableObject {
         }
     }
     
+    func reorderFrame(from sourceIndex: Int, to targetIndex: Int) {
+        print("🔧 REORDER DEBUG:")
+        print("  Input: sourceIndex=\(sourceIndex), targetIndex=\(targetIndex)")
+        
+        // Get visible docs sorted by animation order
+        let visibleDocs = docs.filter { $0.isVisible }.sorted { $0.animationOrder < $1.animationOrder }
+        print("  Visible docs count: \(visibleDocs.count)")
+        
+        // Print current order before reorder
+        print("  Current order before reorder:")
+        for (i, doc) in visibleDocs.enumerated() {
+            print("    [\(i)] \(doc.name) (order: \(doc.animationOrder))")
+        }
+        
+        guard sourceIndex >= 0 && sourceIndex < visibleDocs.count &&
+              targetIndex >= 0 && targetIndex < visibleDocs.count &&
+              sourceIndex != targetIndex else { 
+            print("  ❌ Guard failed - invalid indices")
+            return 
+        }
+        
+        // Get the source doc
+        let sourceDoc = visibleDocs[sourceIndex]
+        print("  Source doc: \(sourceDoc.name) (order: \(sourceDoc.animationOrder))")
+        
+        // Find the actual index of the source doc in the main docs array
+        guard let sourceDocIndex = docs.firstIndex(where: { $0.id == sourceDoc.id }) else { 
+            print("  ❌ Could not find source doc in main docs array")
+            return 
+        }
+        print("  Source doc index in main array: \(sourceDocIndex)")
+        
+        // Calculate new animation order
+        let newAnimationOrder: Int
+        if targetIndex == 0 {
+            // Moving to the beginning
+            newAnimationOrder = visibleDocs[0].animationOrder - 1
+            print("  Moving to beginning, new order: \(newAnimationOrder)")
+        } else if targetIndex >= visibleDocs.count - 1 {
+            // Moving to the end
+            newAnimationOrder = visibleDocs[visibleDocs.count - 1].animationOrder + 1
+            print("  Moving to end, new order: \(newAnimationOrder)")
+        } else {
+            // Moving to middle - place between two frames
+            let prevOrder = visibleDocs[targetIndex - 1].animationOrder
+            let nextOrder = visibleDocs[targetIndex].animationOrder
+            newAnimationOrder = (prevOrder + nextOrder) / 2
+            print("  Moving to middle, prev: \(prevOrder), next: \(nextOrder), new: \(newAnimationOrder)")
+        }
+        
+        // Update the animation order
+        let oldOrder = docs[sourceDocIndex].animationOrder
+        docs[sourceDocIndex].animationOrder = newAnimationOrder
+        print("  Updated animation order: \(oldOrder) -> \(newAnimationOrder)")
+        
+        // If we're currently viewing this frame, update the current frame index
+        if currentFrameIndex == sourceIndex {
+            currentFrameIndex = targetIndex
+            print("  Updated current frame index: \(sourceIndex) -> \(targetIndex)")
+        } else if currentFrameIndex > sourceIndex && currentFrameIndex <= targetIndex {
+            currentFrameIndex -= 1
+            print("  Adjusted current frame index: \(currentFrameIndex + 1) -> \(currentFrameIndex)")
+        } else if currentFrameIndex < sourceIndex && currentFrameIndex >= targetIndex {
+            currentFrameIndex += 1
+            print("  Adjusted current frame index: \(currentFrameIndex - 1) -> \(currentFrameIndex)")
+        }
+        
+        // Print order after reorder
+        let newVisibleDocs = docs.filter { $0.isVisible }.sorted { $0.animationOrder < $1.animationOrder }
+        print("  Order after reorder:")
+        for (i, doc) in newVisibleDocs.enumerated() {
+            print("    [\(i)] \(doc.name) (order: \(doc.animationOrder))")
+        }
+        
+        print("  ✅ Reorder completed successfully")
+    }
+    
     func getCurrentFrame() -> ImageDoc? {
         let visibleDocs = docs.filter { $0.isVisible }.sorted { $0.animationOrder < $1.animationOrder }
         guard !visibleDocs.isEmpty else { return nil }
@@ -1920,17 +1997,74 @@ struct AnimationCanvas: View {
                     
                     // Current frame
                     if let currentFrame = vm.getCurrentFrame() {
-                        Image(nsImage: currentFrame.original)
-                            .resizable()
-                            .interpolation(.high)
-                            .antialiased(true)
-                            .aspectRatio(contentMode: .fit)
-                            .frame(maxWidth: geo.size.width * 0.8, maxHeight: geo.size.height * 0.8)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(Color.accentColor, lineWidth: 2)
-                            )
-                            .shadow(radius: 8)
+                        ZStack {
+                            // Image with proper frame border
+                            Image(nsImage: currentFrame.original)
+                                .resizable()
+                                .interpolation(.high)
+                                .antialiased(true)
+                                .aspectRatio(contentMode: .fit)
+                                .frame(maxWidth: geo.size.width * 0.8, maxHeight: geo.size.height * 0.8)
+                                .overlay(
+                                    // Frame border that matches the actual image dimensions
+                                    Rectangle()
+                                        .stroke(Color.accentColor, lineWidth: 3)
+                                        .frame(
+                                            width: min(geo.size.width * 0.8, currentFrame.original.size.width * (geo.size.height * 0.8 / currentFrame.original.size.height)),
+                                            height: min(geo.size.height * 0.8, currentFrame.original.size.height * (geo.size.width * 0.8 / currentFrame.original.size.width))
+                                        )
+                                )
+                                .overlay(
+                                    // Corner indicators for frame boundaries
+                                    VStack {
+                                        HStack {
+                                            FrameCornerIndicator()
+                                            Spacer()
+                                            FrameCornerIndicator()
+                                        }
+                                        Spacer()
+                                        HStack {
+                                            FrameCornerIndicator()
+                                            Spacer()
+                                            FrameCornerIndicator()
+                                        }
+                                    }
+                                    .frame(
+                                        width: min(geo.size.width * 0.8, currentFrame.original.size.width * (geo.size.height * 0.8 / currentFrame.original.size.height)),
+                                        height: min(geo.size.height * 0.8, currentFrame.original.size.height * (geo.size.width * 0.8 / currentFrame.original.size.width))
+                                    )
+                                )
+                                .shadow(radius: 8)
+                                
+                                // Frame information overlay
+                                VStack {
+                                    Spacer()
+                                    HStack {
+                                        Spacer()
+                                        VStack(alignment: .trailing, spacing: 4) {
+                                            Text("Frame \(vm.currentFrameIndex + 1) of \(vm.getVisibleFrames().count)")
+                                                .font(.caption)
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 4)
+                                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                                            
+                                            Text("\(Int(currentFrame.original.size.width))×\(Int(currentFrame.original.size.height))")
+                                                .font(.caption2)
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 2)
+                                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                                            
+                                            Text("\(Int(currentFrame.frameDuration * 1000))ms")
+                                                .font(.caption2)
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 2)
+                                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                                        }
+                                        .padding(.trailing, 16)
+                                        .padding(.bottom, 16)
+                                    }
+                                }
+                        }
                     } else {
                         VStack(spacing: 16) {
                             Image(systemName: "photo.stack")
@@ -1964,14 +2098,22 @@ struct AnimationTimeline: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Header
-            HStack {
-                Text("Animation Timeline")
-                    .font(.headline)
-                Spacer()
-                if !vm.docs.filter { $0.isVisible }.isEmpty {
-                    Text("\(vm.getVisibleFrames().count) frames")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Animation Timeline")
+                        .font(.headline)
+                    Spacer()
+                    if !vm.docs.filter { $0.isVisible }.isEmpty {
+                        Text("\(vm.getVisibleFrames().count) frames")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                
+                if !vm.getVisibleFrames().isEmpty {
+                    Text("Drag frames to reorder")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
             }
             
@@ -2021,10 +2163,18 @@ struct AnimationFrameRow: View {
     let isCurrentFrame: Bool
     
     @State private var durationText: String = ""
+    @State private var isDragging: Bool = false
+    @State private var dragOffset: CGSize = .zero
     
     var body: some View {
         HStack(spacing: 8) {
-            // Frame thumbnail
+            // Drag handle
+            Image(systemName: "line.3.horizontal")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+            
+            // Frame thumbnail with proper frame border
             Image(nsImage: doc.original)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
@@ -2032,7 +2182,10 @@ struct AnimationFrameRow: View {
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .overlay(
                     RoundedRectangle(cornerRadius: 4)
-                        .stroke(isCurrentFrame ? Color.accentColor : Color.secondary.opacity(0.3), lineWidth: isCurrentFrame ? 2 : 1)
+                        .stroke(
+                            isCurrentFrame ? Color.accentColor : Color.secondary.opacity(0.3), 
+                            lineWidth: isCurrentFrame ? 3 : 1
+                        )
                 )
             
             // Frame info
@@ -2040,9 +2193,12 @@ struct AnimationFrameRow: View {
                 Text(doc.name)
                     .font(.caption)
                     .lineLimit(1)
-                Text("\(Int(doc.frameDuration * 1000))ms")
+                Text("\(Int(doc.original.size.width))×\(Int(doc.original.size.height))")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                Text("\(Int(doc.frameDuration * 1000))ms")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
             
             Spacer()
@@ -2100,6 +2256,66 @@ struct AnimationFrameRow: View {
         .onChange(of: doc.frameDuration) { _, newValue in
             durationText = String(format: "%.1f", newValue)
         }
+        .offset(dragOffset)
+        .scaleEffect(isDragging ? 1.05 : 1.0)
+        .opacity(isDragging ? 0.8 : 1.0)
+        .gesture(
+            DragGesture()
+                .onChanged { value in
+                    if !isDragging {
+                        isDragging = true
+                    }
+                    dragOffset = value.translation
+                }
+                .onEnded { value in
+                    isDragging = false
+                    dragOffset = .zero
+                    
+                    // Calculate which frame to swap with based on drag distance
+                    let dragDistance = value.translation.height
+                    let frameHeight: CGFloat = 80 // More accurate height of each frame row (including spacing)
+                    let targetIndex = index + Int(round(dragDistance / frameHeight))
+                    
+                    print("🔄 DRAG DEBUG:")
+                    print("  Source index: \(index)")
+                    print("  Drag distance: \(dragDistance)")
+                    print("  Frame height: \(frameHeight)")
+                    print("  Calculated target index: \(targetIndex)")
+                    
+                    // Ensure target index is within bounds
+                    let visibleFrames = vm.getVisibleFrames()
+                    print("  Visible frames count: \(visibleFrames.count)")
+                    
+                    // Clamp target index to valid range
+                    let clampedTargetIndex = max(0, min(targetIndex, visibleFrames.count - 1))
+                    print("  Clamped target index: \(targetIndex) -> \(clampedTargetIndex)")
+                    print("  Target index valid: \(clampedTargetIndex != index)")
+                    
+                    if clampedTargetIndex != index {
+                        print("  ✅ Calling reorderFrame(from: \(index), to: \(clampedTargetIndex))")
+                        // Perform the reorder using a simpler approach
+                        vm.reorderFrame(from: index, to: clampedTargetIndex)
+                        print("  ✅ Reorder completed")
+                    } else {
+                        print("  ❌ Reorder skipped - same position")
+                    }
+                }
+        )
+    }
+}
+
+// MARK: - Animation Support Views
+
+
+struct FrameCornerIndicator: View {
+    var body: some View {
+        Circle()
+            .fill(Color.accentColor)
+            .frame(width: 8, height: 8)
+            .overlay(
+                Circle()
+                    .stroke(Color.white, lineWidth: 1)
+            )
     }
 }
 
