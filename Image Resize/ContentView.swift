@@ -24,6 +24,10 @@ struct ImageDoc: Identifiable, Hashable {
     var overlayOpacity: Double = 1.0
     /// Position for drag-to-move functionality
     var position: CGPoint = .zero
+    /// Canvas size for canvas resize mode (the visible frame size around the image)
+    var canvasSize: CGSize?
+    /// Image offset within the canvas (for centering/positioning)
+    var imageOffset: CGPoint = .zero
     
     var aspectRatio: CGFloat {
         let s = original.size
@@ -92,6 +96,14 @@ final class ImageWorkbench: ObservableObject {
     @Published var focusedID: ImageDoc.ID? = nil
     @Published var layout: LayoutMode = .sideBySide
     @Published var keepAspect = true
+    @Published var canvasResizeMode = false {
+        didSet {
+            // When switching back to image resize mode, "bake" the canvas size into the display size
+            if !canvasResizeMode {
+                bakeCanvasSizesIntoDisplaySizes()
+            }
+        }
+    }
     @Published var history: [ImageDoc] = []
     @Published var dragOffset: CGSize = .zero
     @Published var isDragging: Bool = false
@@ -281,9 +293,144 @@ final class ImageWorkbench: ObservableObject {
         docs[idx] = doc
     }
     
+    // MARK: Edge resize (for canvas mode)
+    func edgeResize(for id: ImageDoc.ID, edge: ResizeEdge, delta: CGSize) {
+        guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
+        var doc = docs[idx]
+        
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        print("[\(timestamp)] 🔧 EDGE RESIZE CALLED - Edge: \(edge), Delta: \(delta)")
+        
+        // Initialize canvas size if not set (first time in canvas resize mode)
+        if doc.canvasSize == nil {
+            doc.canvasSize = doc.displaySize
+            // Center the image in the canvas initially
+            doc.imageOffset = .zero
+        }
+        
+        var canvasSize = doc.canvasSize!
+        var imageOffset = doc.imageOffset
+        
+        // Like Procreate: the image stays at its fixed position,
+        // and we're adjusting the canvas boundaries around it
+        switch edge {
+        case .top:
+            // Drag up = expand canvas (add space on top)
+            // Drag down = shrink canvas (crop from top)
+            let heightDelta = -delta.height
+            canvasSize.height = max(50, canvasSize.height + heightDelta)
+            // Move image down when expanding top, up when shrinking
+            imageOffset.y += heightDelta
+        case .bottom:
+            // Drag down = expand canvas (add space on bottom)
+            // Drag up = shrink canvas (crop from bottom)
+            canvasSize.height = max(50, canvasSize.height + delta.height)
+            // Image offset doesn't change - just the canvas bottom edge moves
+        case .left:
+            // Drag left = expand canvas (add space on left)
+            // Drag right = shrink canvas (crop from left)
+            let widthDelta = -delta.width
+            canvasSize.width = max(50, canvasSize.width + widthDelta)
+            // Move image right when expanding left, left when shrinking
+            imageOffset.x += widthDelta
+        case .right:
+            // Drag right = expand canvas (add space on right)
+            // Drag left = shrink canvas (crop from right)
+            canvasSize.width = max(50, canvasSize.width + delta.width)
+            // Image offset doesn't change - just the canvas right edge moves
+        }
+        
+        // Don't apply aspect ratio constraints in canvas resize mode
+        // Canvas resize should allow free-form resizing like Procreate
+        if keepAspect && !canvasResizeMode {
+            let ar = doc.aspectRatio
+            if canvasSize.width / max(canvasSize.height, 1) > ar {
+                canvasSize.width = canvasSize.height * ar
+            } else {
+                canvasSize.height = canvasSize.width / max(ar, 0.0001)
+            }
+        }
+        
+        print("[\(timestamp)] 🔧 CANVAS SIZE CHANGE - Old: \(doc.canvasSize?.width ?? 0)x\(doc.canvasSize?.height ?? 0) -> New: \(canvasSize.width)x\(canvasSize.height)")
+        
+        doc.canvasSize = canvasSize
+        doc.imageOffset = imageOffset
+        docs[idx] = doc
+    }
+    
+    
     func resetPosition(for id: ImageDoc.ID) {
         guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
         docs[idx].position = CGPoint(x: 400, y: 300) // Reset to center
+    }
+    
+    func bakeCanvasSizesIntoDisplaySizes() {
+        // When switching from canvas resize to image resize mode,
+        // "bake" the canvas size into the display size by creating a new composite image
+        for idx in docs.indices {
+            if let canvasSize = docs[idx].canvasSize {
+                let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+                print("[\(timestamp)] 🔄 BAKING CANVAS - Image: \(docs[idx].name)")
+                print("[\(timestamp)]   Old display size: \(docs[idx].displaySize.width)x\(docs[idx].displaySize.height)")
+                print("[\(timestamp)]   Canvas size: \(canvasSize.width)x\(canvasSize.height)")
+                print("[\(timestamp)]   Image offset: \(docs[idx].imageOffset.x)x\(docs[idx].imageOffset.y)")
+                
+                // Create a new image with the canvas size that includes the original image with padding
+                if let compositeImage = createCompositeImage(
+                    original: docs[idx].original,
+                    displaySize: docs[idx].displaySize,
+                    canvasSize: canvasSize,
+                    imageOffset: docs[idx].imageOffset
+                ) {
+                    print("[\(timestamp)]   Created composite image: \(compositeImage.size.width)x\(compositeImage.size.height)")
+                    
+                    // Replace the original image with the composite
+                    docs[idx].original = compositeImage
+                    // Set the display size to match the canvas size
+                    docs[idx].displaySize = canvasSize
+                    
+                    print("[\(timestamp)]   New display size: \(docs[idx].displaySize.width)x\(docs[idx].displaySize.height)")
+                } else {
+                    print("[\(timestamp)]   Failed to create composite image, falling back to size change only")
+                    docs[idx].displaySize = canvasSize
+                }
+                
+                // Clear the canvas-specific properties since we're now in image resize mode
+                docs[idx].canvasSize = nil
+                docs[idx].imageOffset = .zero
+            }
+        }
+    }
+    
+    private func createCompositeImage(original: NSImage, displaySize: CGSize, canvasSize: CGSize, imageOffset: CGPoint) -> NSImage? {
+        // Create a new image with the canvas size
+        let composite = NSImage(size: canvasSize)
+        
+        composite.lockFocus()
+        defer { composite.unlockFocus() }
+        
+        // Fill with transparent background
+        NSColor.clear.set()
+        NSRect(origin: .zero, size: canvasSize).fill()
+        
+        // macOS uses bottom-left origin, but SwiftUI uses top-left
+        // We need to flip the Y coordinate to match the visual representation
+        // When we add padding to the top in SwiftUI (negative imageOffset.y),
+        // it should appear at the top in the final image
+        let flippedY = canvasSize.height - displaySize.height - imageOffset.y
+        
+        // Draw the original image at the offset position with the display size
+        let destRect = NSRect(
+            x: imageOffset.x,
+            y: flippedY,
+            width: displaySize.width,
+            height: displaySize.height
+        )
+        
+        NSGraphicsContext.current?.imageInterpolation = .high
+        original.draw(in: destRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        
+        return composite
     }
     
     // MARK: History management
@@ -440,6 +587,10 @@ final class ImageWorkbench: ObservableObject {
     enum ResizeCorner {
         case topLeft, topRight, bottomLeft, bottomRight
     }
+    
+    enum ResizeEdge {
+        case top, bottom, left, right
+    }
 }
 
 // MARK: - App
@@ -569,6 +720,8 @@ struct ToolbarBar: View {
             }
             .pickerStyle(.segmented)
             Toggle("Lock aspect", isOn: $vm.keepAspect)
+                .toggleStyle(.switch)
+            Toggle("Canvas Resize", isOn: $vm.canvasResizeMode)
                 .toggleStyle(.switch)
             Spacer()
             if !vm.docs.isEmpty {
@@ -748,38 +901,82 @@ struct DraggableResizableImage: View {
         let isFocused = vm.isFocused(doc)
         let currentPosition = doc.position
         
-        return Image(nsImage: doc.original)
-            .resizable()
-            .interpolation(.high)
-            .antialiased(true)
-            .aspectRatio(contentMode: .fit)
-            .frame(width: doc.displaySize.width, height: doc.displaySize.height)
+        // Use canvas size only when in canvas resize mode, otherwise use display size
+        let frameSize = vm.canvasResizeMode ? (doc.canvasSize ?? doc.displaySize) : doc.displaySize
+        
+        // Debug logging
+        if vm.canvasResizeMode {
+            print("🔍 CANVAS SIZE DEBUG - Canvas: \(doc.canvasSize?.width ?? 0)x\(doc.canvasSize?.height ?? 0), Display: \(doc.displaySize.width)x\(doc.displaySize.height), Frame: \(frameSize.width)x\(frameSize.height)")
+        }
+        
+        return ZStack(alignment: .topLeading) {
+            // Background for the canvas - checkerboard pattern to show transparency
+            Rectangle()
+                .fill(Color.gray.opacity(0.15))
+                .frame(width: frameSize.width, height: frameSize.height)
+            
+            // The image, positioned within the canvas
+            Image(nsImage: doc.original)
+                .resizable()
+                .interpolation(.high)
+                .antialiased(true)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: doc.displaySize.width, height: doc.displaySize.height)
+                .offset(x: doc.imageOffset.x, y: doc.imageOffset.y)
+        }
+        .frame(width: frameSize.width, height: frameSize.height)
+        .clipped()
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(isFocused ? Color.accentColor : .clear, lineWidth: 2)
             )
             .overlay(
-                // Corner resize handles
+                // Resize handles - corners for normal mode, edges for canvas mode
                 Group {
                     if isFocused && !isDragging {
-                        ForEach([ImageWorkbench.ResizeCorner.topLeft, .topRight, .bottomLeft, .bottomRight], id: \.self) { corner in
-                            ResizeHandle(corner: corner, onDragStart: {
-                                let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-                                print("[\(timestamp)] 🔧 RESIZE START - Corner: \(corner)")
-                                isResizing = true
-                                resizeCorner = corner
-                                resizeStartSize = doc.displaySize
-                            }, onDragChanged: { translation in
-                                if isResizing {
-                                    vm.cornerResize(for: doc.id, corner: corner, delta: translation)
-                                }
-                            }, onDragEnd: {
-                                let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-                                print("[\(timestamp)] 🔧 RESIZE END - Corner: \(corner)")
-                                isResizing = false
-                                resizeCorner = nil
-                            })
-                            .position(handlePosition(for: corner))
+                        if vm.canvasResizeMode {
+                            // Edge handles for canvas resize mode
+                            ForEach([ImageWorkbench.ResizeEdge.top, .bottom, .left, .right], id: \.self) { edge in
+                                EdgeResizeHandle(edge: edge, onDragStart: {
+                                    let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+                                    print("[\(timestamp)] 🔧 EDGE RESIZE START - Edge: \(edge)")
+                                    isResizing = true
+                                    resizeStartSize = doc.displaySize
+                                }, onDragChanged: { translation in
+                                    if isResizing {
+                                        // Update asynchronously to avoid publishing during view updates
+                                        Task { @MainActor in
+                                            vm.edgeResize(for: doc.id, edge: edge, delta: translation)
+                                        }
+                                    }
+                                }, onDragEnd: {
+                                    let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+                                    print("[\(timestamp)] 🔧 EDGE RESIZE END - Edge: \(edge)")
+                                    isResizing = false
+                                })
+                                .position(edgeHandlePosition(for: edge))
+                            }
+                        } else {
+                            // Corner handles for normal resize mode
+                            ForEach([ImageWorkbench.ResizeCorner.topLeft, .topRight, .bottomLeft, .bottomRight], id: \.self) { corner in
+                                ResizeHandle(corner: corner, onDragStart: {
+                                    let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+                                    print("[\(timestamp)] 🔧 RESIZE START - Corner: \(corner)")
+                                    isResizing = true
+                                    resizeCorner = corner
+                                    resizeStartSize = doc.displaySize
+                                }, onDragChanged: { translation in
+                                    if isResizing {
+                                        vm.cornerResize(for: doc.id, corner: corner, delta: translation)
+                                    }
+                                }, onDragEnd: {
+                                    let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+                                    print("[\(timestamp)] 🔧 RESIZE END - Corner: \(corner)")
+                                    isResizing = false
+                                    resizeCorner = nil
+                                })
+                                .position(handlePosition(for: corner))
+                            }
                         }
                     }
                 }
@@ -856,10 +1053,11 @@ struct DraggableResizableImage: View {
     }
     
     private func handlePosition(for corner: ImageWorkbench.ResizeCorner) -> CGPoint {
-        let frameSize = doc.displaySize
+        // Use canvas size if set, otherwise use display size
+        let frameSize = doc.canvasSize ?? doc.displaySize
         
-        // Position handles at the actual corners of the image frame
-        // Overlay coordinate system starts at (0,0) at top-left of image
+        // Position handles at the actual corners of the frame
+        // Overlay coordinate system starts at (0,0) at top-left of frame
         let position: CGPoint
         switch corner {
         case .topLeft:
@@ -874,11 +1072,60 @@ struct DraggableResizableImage: View {
         
         return position
     }
+    
+    private func edgeHandlePosition(for edge: ImageWorkbench.ResizeEdge) -> CGPoint {
+        // Use canvas size if set, otherwise use display size
+        let frameSize = doc.canvasSize ?? doc.displaySize
+        
+        // Position handles at the midpoints of each edge
+        let position: CGPoint
+        switch edge {
+        case .top:
+            position = CGPoint(x: frameSize.width / 2, y: 0)
+        case .bottom:
+            position = CGPoint(x: frameSize.width / 2, y: frameSize.height)
+        case .left:
+            position = CGPoint(x: 0, y: frameSize.height / 2)
+        case .right:
+            position = CGPoint(x: frameSize.width, y: frameSize.height / 2)
+        }
+        
+        return position
+    }
 }
 
-// Resize handle view
+// Resize handle view (for corners)
 struct ResizeHandle: View {
     let corner: ImageWorkbench.ResizeCorner
+    let onDragStart: () -> Void
+    let onDragChanged: (CGSize) -> Void
+    let onDragEnd: () -> Void
+    
+    var body: some View {
+        Circle()
+            .fill(Color.accentColor)
+            .frame(width: 16, height: 16)
+            .overlay(
+                Circle()
+                    .stroke(Color.white, lineWidth: 2)
+            )
+            .shadow(radius: 2)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        onDragStart()
+                        onDragChanged(value.translation)
+                    }
+                    .onEnded { _ in
+                        onDragEnd()
+                    }
+            )
+    }
+}
+
+// Edge resize handle view (for canvas resize mode)
+struct EdgeResizeHandle: View {
+    let edge: ImageWorkbench.ResizeEdge
     let onDragStart: () -> Void
     let onDragChanged: (CGSize) -> Void
     let onDragEnd: () -> Void
