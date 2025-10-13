@@ -28,10 +28,34 @@ struct ImageDoc: Identifiable, Hashable {
     var canvasSize: CGSize?
     /// Image offset within the canvas (for centering/positioning)
     var imageOffset: CGPoint = .zero
+    /// Original size when first loaded (for modification tracking)
+    var originalSize: CGSize
     
     var aspectRatio: CGFloat {
         let s = original.size
         return s.height == 0 ? 1 : s.width / s.height
+    }
+    
+    /// Returns true if the image has been modified from its original state
+    var isModified: Bool {
+        // Check if display size differs from original size (with small tolerance for floating point precision)
+        let sizeTolerance: CGFloat = 0.1
+        let sizeChanged = abs(displaySize.width - originalSize.width) > sizeTolerance ||
+                         abs(displaySize.height - originalSize.height) > sizeTolerance
+        
+        // Check if position has been moved from center (with tolerance)
+        let centerPosition = CGPoint(x: 400, y: 300)
+        let positionTolerance: CGFloat = 1.0
+        let positionChanged = abs(position.x - centerPosition.x) > positionTolerance ||
+                             abs(position.y - centerPosition.y) > positionTolerance
+        
+        // Check if opacity has been changed from default
+        let opacityChanged = abs(overlayOpacity - 1.0) > 0.01
+        
+        // Check if canvas resize has been used
+        let canvasChanged = canvasSize != nil
+        
+        return sizeChanged || positionChanged || opacityChanged || canvasChanged
     }
 }
 
@@ -48,7 +72,7 @@ struct PersistentImageDoc: Codable {
         self.url = doc.url
         self.name = doc.name
         self.displaySize = doc.displaySize
-        self.originalSize = doc.original.size
+        self.originalSize = doc.originalSize
         self.lastAccessed = Date()
         
         // Try to get image data from the original image
@@ -83,7 +107,8 @@ struct PersistentImageDoc: Codable {
             name: name,
             original: img,
             displaySize: displaySize,
-            position: CGPoint(x: 400, y: 300)
+            position: CGPoint(x: 400, y: 300),
+            originalSize: originalSize
         )
     }
 }
@@ -139,7 +164,7 @@ final class ImageWorkbench: ObservableObject {
                 let s = img.size
                 let start = CGSize(width: min(800, s.width), height: min(800 * (s.height / max(s.width, 1)), s.height))
                 let centerPosition = CGPoint(x: 400, y: 300) // Default center position
-                let doc = ImageDoc(url: url, name: url.lastPathComponent, original: img, displaySize: start, position: centerPosition)
+                let doc = ImageDoc(url: url, name: url.lastPathComponent, original: img, displaySize: start, position: centerPosition, originalSize: s)
                 newDocs.append(doc)
                 addToHistory(doc)
             }
@@ -160,7 +185,7 @@ final class ImageWorkbench: ObservableObject {
                         let s = img.size
                         let start = CGSize(width: min(800, s.width), height: min(800 * (s.height / max(s.width, 1)), s.height))
                         let centerPosition = CGPoint(x: 400, y: 300) // Default center position
-                        let doc = ImageDoc(url: nil, name: "Dropped Image", original: img, displaySize: start, position: centerPosition)
+                        let doc = ImageDoc(url: nil, name: "Dropped Image", original: img, displaySize: start, position: centerPosition, originalSize: s)
                         self.docs.append(doc)
                         self.addToHistory(doc)
                         if self.focusedID == nil { self.focusedID = doc.id }
@@ -191,6 +216,61 @@ final class ImageWorkbench: ObservableObject {
             guard let resized = focused.original.resized(to: target, keepAspect: self.keepAspect),
                   let data = resized.data(for: format) else { return }
             try? data.write(to: dest)
+        }
+    }
+    
+    func saveAllModified(as format: SaveFormat) {
+        // Filter to only modified images
+        let modifiedDocs = docs.filter { $0.isModified }
+        
+        guard !modifiedDocs.isEmpty else { 
+            print("No modified images to save")
+            return 
+        }
+        
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.prompt = "Select Folder"
+        panel.message = "Choose a folder to save \(modifiedDocs.count) modified image\(modifiedDocs.count == 1 ? "" : "s")"
+        
+        panel.begin { resp in
+            guard resp == .OK, let folderURL = panel.url else { return }
+            
+            Task { @MainActor in
+                var savedCount = 0
+                var failedCount = 0
+                
+                for doc in modifiedDocs {
+                    let baseName = (doc.url?.deletingPathExtension().lastPathComponent ?? doc.name)
+                    let fileName = baseName + format.suggestedExtension
+                    let fileURL = folderURL.appendingPathComponent(fileName)
+                    
+                    let target = doc.displaySize
+                    guard let resized = doc.original.resized(to: target, keepAspect: self.keepAspect),
+                          let data = resized.data(for: format) else {
+                        failedCount += 1
+                        continue
+                    }
+                    
+                    do {
+                        try data.write(to: fileURL)
+                        savedCount += 1
+                    } catch {
+                        print("Failed to save \(fileName): \(error)")
+                        failedCount += 1
+                    }
+                }
+                
+                // Show completion message
+                let message = "Saved \(savedCount) modified image\(savedCount == 1 ? "" : "s")"
+                let detailMessage = failedCount > 0 ? " (\(failedCount) failed)" : ""
+                print(message + detailMessage)
+                
+                // You could show an alert here if you want user feedback
+                // For now, we'll just print to console
+            }
         }
     }
     
@@ -482,7 +562,8 @@ final class ImageWorkbench: ObservableObject {
                 name: doc.name,
                 original: doc.original,
                 displaySize: doc.displaySize,
-                position: CGPoint(x: 400, y: 300)
+                position: CGPoint(x: 400, y: 300),
+                originalSize: doc.originalSize
             )
             docs.append(newDoc)
             focusedID = newDoc.id
@@ -738,12 +819,23 @@ struct ToolbarBar: View {
                     Label("Clear History", systemImage: "clock.arrow.circlepath")
                 }
             }
-            if vm.focusedID != nil {
+            if !vm.docs.isEmpty {
                 Menu {
-                    Button("PNG") { vm.saveFocused(as: .png) }
-                    Button("JPEG") { vm.saveFocused(as: .jpeg) }
+                    if vm.focusedID != nil {
+                        Section("Save Focused") {
+                            Button("PNG") { vm.saveFocused(as: .png) }
+                            Button("JPEG") { vm.saveFocused(as: .jpeg) }
+                        }
+                    }
+                    let modifiedCount = vm.docs.filter { $0.isModified }.count
+                    if modifiedCount > 0 {
+                        Section("Save All Modified (\(modifiedCount))") {
+                            Button("PNG") { vm.saveAllModified(as: .png) }
+                            Button("JPEG") { vm.saveAllModified(as: .jpeg) }
+                        }
+                    }
                 } label: {
-                    Label("Save Focused", systemImage: "square.and.arrow.down")
+                    Label("Save", systemImage: "square.and.arrow.down")
                 }
             }
         }
