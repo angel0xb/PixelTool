@@ -30,6 +30,8 @@ struct ImageDoc: Identifiable, Hashable {
     var imageOffset: CGPoint = .zero
     /// Original size when first loaded (for modification tracking)
     var originalSize: CGSize
+    /// Border color for overlay mode (each image gets a different color)
+    var borderColor: Color
     
     var aspectRatio: CGFloat {
         let s = original.size
@@ -67,6 +69,7 @@ struct PersistentImageDoc: Codable {
     let originalSize: CGSize
     let lastAccessed: Date
     let imageData: Data? // Store the actual image data
+    let borderColorData: Data? // Store the border color as data
     
     init(from doc: ImageDoc) {
         self.url = doc.url
@@ -81,6 +84,17 @@ struct PersistentImageDoc: Codable {
         } else {
             self.imageData = nil
         }
+        
+        // Store border color as data (we'll use a simple approach with RGB values)
+        let color = doc.borderColor
+        let nsColor = NSColor(color)
+        let rgb = nsColor.usingColorSpace(.sRGB) ?? nsColor
+        let colorData = Data([
+            UInt8(rgb.redComponent * 255),
+            UInt8(rgb.greenComponent * 255),
+            UInt8(rgb.blueComponent * 255)
+        ])
+        self.borderColorData = colorData
     }
     
     func toImageDoc() -> ImageDoc? {
@@ -102,13 +116,26 @@ struct PersistentImageDoc: Codable {
             return nil 
         }
         
+        // Restore border color from data
+        let borderColor: Color
+        if let colorData = borderColorData, colorData.count >= 3 {
+            let red = Double(colorData[0]) / 255.0
+            let green = Double(colorData[1]) / 255.0
+            let blue = Double(colorData[2]) / 255.0
+            borderColor = Color(red: red, green: green, blue: blue)
+        } else {
+            // Default to red if no color data
+            borderColor = .red
+        }
+        
         return ImageDoc(
             url: url,
             name: name,
             original: img,
             displaySize: displaySize,
             position: CGPoint(x: 400, y: 300),
-            originalSize: originalSize
+            originalSize: originalSize,
+            borderColor: borderColor
         )
     }
 }
@@ -129,6 +156,7 @@ final class ImageWorkbench: ObservableObject {
             }
         }
     }
+    @Published var showBorders = false
     @Published var history: [ImageDoc] = []
     @Published var dragOffset: CGSize = .zero
     @Published var isDragging: Bool = false
@@ -166,7 +194,8 @@ final class ImageWorkbench: ObservableObject {
                 let s = img.size
                 let start = CGSize(width: min(800, s.width), height: min(800 * (s.height / max(s.width, 1)), s.height))
                 let centerPosition = CGPoint(x: 400, y: 300) // Default center position
-                let doc = ImageDoc(url: url, name: url.lastPathComponent, original: img, displaySize: start, position: centerPosition, originalSize: s)
+                let borderColor = generateBorderColor(for: newDocs.count)
+                let doc = ImageDoc(url: url, name: url.lastPathComponent, original: img, displaySize: start, position: centerPosition, originalSize: s, borderColor: borderColor)
                 newDocs.append(doc)
                 addToHistory(doc)
             }
@@ -187,7 +216,8 @@ final class ImageWorkbench: ObservableObject {
                         let s = img.size
                         let start = CGSize(width: min(800, s.width), height: min(800 * (s.height / max(s.width, 1)), s.height))
                         let centerPosition = CGPoint(x: 400, y: 300) // Default center position
-                        let doc = ImageDoc(url: nil, name: "Dropped Image", original: img, displaySize: start, position: centerPosition, originalSize: s)
+                        let borderColor = self.generateBorderColor(for: self.docs.count)
+                        let doc = ImageDoc(url: nil, name: "Dropped Image", original: img, displaySize: start, position: centerPosition, originalSize: s, borderColor: borderColor)
                         self.docs.append(doc)
                         self.addToHistory(doc)
                         if self.focusedID == nil { self.focusedID = doc.id }
@@ -587,13 +617,15 @@ final class ImageWorkbench: ObservableObject {
         
         if !isAlreadyOpen {
             // Create a new instance with current timestamp
+            let borderColor = generateBorderColor(for: docs.count)
             let newDoc = ImageDoc(
                 url: doc.url,
                 name: doc.name,
                 original: doc.original,
                 displaySize: doc.displaySize,
                 position: CGPoint(x: 400, y: 300),
-                originalSize: doc.originalSize
+                originalSize: doc.originalSize,
+                borderColor: borderColor
             )
             docs.append(newDoc)
             focusedID = newDoc.id
@@ -701,6 +733,43 @@ final class ImageWorkbench: ObservableObject {
     
     enum ResizeEdge {
         case top, bottom, left, right
+    }
+    
+    // MARK: Border color generation
+    private static let borderColors: [Color] = [
+        .red, .blue, .green, .orange, .purple, .pink, .yellow, .cyan, .mint, .indigo
+    ]
+    
+    func generateBorderColor(for index: Int) -> Color {
+        return ImageWorkbench.borderColors[index % ImageWorkbench.borderColors.count]
+    }
+    
+    // MARK: Restack functionality
+    func restackImages() {
+        // Move all images to the same center position
+        let centerPosition = CGPoint(x: 400, y: 300)
+        
+        for index in docs.indices {
+            docs[index].position = centerPosition
+        }
+        
+        // Shuffle the docs array to randomize the stacking order
+        docs.shuffle()
+        
+        // Update border colors to maintain unique colors for each image
+        for (index, _) in docs.enumerated() {
+            docs[index].borderColor = generateBorderColor(for: index)
+        }
+        
+        // Keep the same focused image if any
+        if let currentFocusedID = focusedID {
+            // Find the new index of the focused image after shuffling
+            if let newIndex = docs.firstIndex(where: { $0.id == currentFocusedID }) {
+                // Move the focused image to the end (top of stack)
+                let focusedDoc = docs.remove(at: newIndex)
+                docs.append(focusedDoc)
+            }
+        }
     }
 }
 
@@ -832,8 +901,17 @@ struct ToolbarBar: View {
             .pickerStyle(.segmented)
             Toggle("Lock aspect", isOn: $vm.keepAspect)
                 .toggleStyle(.switch)
-            Toggle("Canvas Resize", isOn: $vm.canvasResizeMode)
-                .toggleStyle(.switch)
+            if vm.layout == .overlay {
+                Toggle("Canvas Resize", isOn: $vm.canvasResizeMode)
+                    .toggleStyle(.switch)
+                Toggle("Show Borders", isOn: $vm.showBorders)
+                    .toggleStyle(.switch)
+                Button {
+                    vm.restackImages()
+                } label: {
+                    Label("Restack", systemImage: "square.stack.3d.up")
+                }
+            }
             Spacer()
             if !vm.docs.isEmpty {
                 Button {
@@ -1050,7 +1128,11 @@ struct DraggableResizableImage: View {
         .clipped()
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(isFocused ? Color.accentColor : .clear, lineWidth: 2)
+                    .stroke(
+                        isFocused ? Color.accentColor : 
+                        (vm.showBorders ? doc.borderColor : .clear), 
+                        lineWidth: 2
+                    )
             )
             .overlay(
                 // Resize handles - corners for normal mode, edges for canvas mode
