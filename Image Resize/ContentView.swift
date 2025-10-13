@@ -93,6 +93,8 @@ final class ImageWorkbench: ObservableObject {
     @Published var layout: LayoutMode = .sideBySide
     @Published var keepAspect = true
     @Published var history: [ImageDoc] = []
+    @Published var dragOffset: CGSize = .zero
+    @Published var isDragging: Bool = false
     
     init() {
         loadHistory()
@@ -235,6 +237,14 @@ final class ImageWorkbench: ObservableObject {
     func updatePosition(for id: ImageDoc.ID, _ position: CGPoint) {
         guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
         docs[idx].position = position
+    }
+    
+    func updateDragState(offset: CGSize, isDragging: Bool, startPosition: CGPoint = .zero) {
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        print("[\(timestamp)] 🔄 UPDATE DRAG STATE - Old offset: \(self.dragOffset), New offset: \(offset), isDragging: \(isDragging)")
+        self.dragOffset = offset
+        self.isDragging = isDragging
+      
     }
     
     // MARK: Corner resize
@@ -611,6 +621,23 @@ struct CanvasArea: View {
                             DraggableResizableImage(doc: doc, maxSize: geo.size)
                                 .opacity(doc.overlayOpacity)
                         }
+                        
+                        // Position display for focused image
+                        if let focusedDoc = vm.docs.first(where: { vm.isFocused($0) }) {
+                            VStack {
+                                Spacer()
+                                HStack {
+                                    Spacer()
+                                    let livePosition = focusedDoc.position
+                                    Text("Position: (\(Int(livePosition.x)), \(Int(livePosition.y)))")
+                                        .font(.caption)
+                                        .padding(8)
+                                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                                        .padding(.trailing, 16)
+                                        .padding(.bottom, 16)
+                                }
+                            }
+                        }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -710,21 +737,16 @@ struct DraggableResizableImage: View {
     let doc: ImageDoc
     let maxSize: CGSize
     
-    @State private var dragOffset: CGSize = .zero
-    @State private var isDragging: Bool = false
     @State private var isResizing: Bool = false
     @State private var resizeCorner: ImageWorkbench.ResizeCorner? = nil
     @State private var resizeStartSize: CGSize = .zero
     @State private var resizeStartPosition: CGPoint = .zero
+    @State private var isDragging: Bool = false
+    @State private var dragStartPosition: CGPoint = .zero
     
     var body: some View {
         let isFocused = vm.isFocused(doc)
-        let currentPosition = CGPoint(
-            x: doc.position.x + dragOffset.width,
-            y: doc.position.y + dragOffset.height
-        )
-        
-        // Debug info removed to prevent publishing warnings
+        let currentPosition = doc.position
         
         return Image(nsImage: doc.original)
             .resizable()
@@ -732,13 +754,6 @@ struct DraggableResizableImage: View {
             .antialiased(true)
             .aspectRatio(contentMode: .fit)
             .frame(width: doc.displaySize.width, height: doc.displaySize.height)
-            .onAppear {
-                print("🖼️ IMAGE FRAME DEBUG:")
-                print("  Image frame size: \(doc.displaySize)")
-                print("  Image position: \(currentPosition)")
-                print("  Image original size: \(doc.original.size)")
-                print("  ---")
-            }
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(isFocused ? Color.accentColor : .clear, lineWidth: 2)
@@ -746,9 +761,11 @@ struct DraggableResizableImage: View {
             .overlay(
                 // Corner resize handles
                 Group {
-                    if isFocused {
+                    if isFocused && !isDragging {
                         ForEach([ImageWorkbench.ResizeCorner.topLeft, .topRight, .bottomLeft, .bottomRight], id: \.self) { corner in
                             ResizeHandle(corner: corner, onDragStart: {
+                                let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+                                print("[\(timestamp)] 🔧 RESIZE START - Corner: \(corner)")
                                 isResizing = true
                                 resizeCorner = corner
                                 resizeStartSize = doc.displaySize
@@ -757,46 +774,72 @@ struct DraggableResizableImage: View {
                                     vm.cornerResize(for: doc.id, corner: corner, delta: translation)
                                 }
                             }, onDragEnd: {
+                                let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+                                print("[\(timestamp)] 🔧 RESIZE END - Corner: \(corner)")
                                 isResizing = false
                                 resizeCorner = nil
                             })
                             .position(handlePosition(for: corner))
-                            .onAppear {
-                                let handlePos = handlePosition(for: corner)
-                                print("📍 HANDLE OVERLAY DEBUG - \(corner):")
-                                print("  Handle position in overlay: \(handlePos)")
-                                print("  Image center position: \(currentPosition)")
-                                print("  Expected handle screen position: (\(currentPosition.x + handlePos.x), \(currentPosition.y + handlePos.y))")
-                                print("  ---")
-                            }
                         }
                     }
                 }
             )
             .shadow(radius: isFocused ? 8 : 0)
-            .onTapGesture { vm.focus(doc.id) }
+            .onTapGesture { 
+                let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+                print("[\(timestamp)] 👆 TAP GESTURE - Image: \(doc.name), isDragging: \(isDragging), isResizing: \(isResizing)")
+                vm.focus(doc.id) 
+            }
+            .onHover { isHovering in
+                // Only handle hover when not dragging to prevent interference
+                if !isDragging {
+                    let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+                    print("[\(timestamp)] 🖱️ HOVER - Image: \(doc.name), isHovering: \(isHovering), isDragging: \(isDragging), isResizing: \(isResizing)")
+                    if isHovering && isFocused {
+                        // Set cursor to indicate draggable
+                        NSCursor.openHand.set()
+                    } else {
+                        NSCursor.arrow.set()
+                    }
+                }
+            }
             .gesture(
-                DragGesture(minimumDistance: 3)
+                // Only allow dragging if this image is focused and not resizing
+                (isFocused && !isResizing) ? DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
-                        if !isResizing {
-                            // Only update drag offset if we're not resizing
-                            dragOffset = value.translation
-                            if !isDragging {
-                                isDragging = true
-                            }
+                        if !isDragging {
+                            let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+                            print("[\(timestamp)] 🖱️ DRAG START - Image: \(doc.name)")
+                            print("[\(timestamp)]   Start location: \(value.startLocation)")
+                            print("[\(timestamp)]   Current doc position: \(doc.position)")
+                            isDragging = true
+                            dragStartPosition = doc.position
+                            NSCursor.closedHand.set()
                         }
+                        
+                        // Calculate new position from start position + translation
+                        let newPosition = CGPoint(
+                            x: dragStartPosition.x + value.translation.width,
+                            y: dragStartPosition.y + value.translation.height
+                        )
+                        
+                        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+                        print("[\(timestamp)] 🖱️ DRAG CHANGED - Translation: \(value.translation), New pos: \(newPosition)")
+                        
+                        vm.updatePosition(for: doc.id, newPosition)
+                        vm.updateDragState(offset: value.translation, isDragging: true)
                     }
                     .onEnded { value in
-                        if !isResizing && isDragging {
-                            let newPosition = CGPoint(
-                                x: doc.position.x + value.translation.width,
-                                y: doc.position.y + value.translation.height
-                            )
-                            vm.updatePosition(for: doc.id, newPosition)
-                            dragOffset = .zero
+                        if isDragging {
+                            let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+                            print("[\(timestamp)] 🖱️ DRAG END - Image: \(doc.name)")
+                            print("[\(timestamp)]   Translation: \(value.translation)")
+                            print("[\(timestamp)]   Final position: \(doc.position)")
+                            vm.updateDragState(offset: .zero, isDragging: false)
                             isDragging = false
+                            NSCursor.arrow.set()
                         }
-                    }
+                    } : nil
             )
             .contextMenu {
                 Button("Focus") { vm.focus(doc.id) }
@@ -829,14 +872,6 @@ struct DraggableResizableImage: View {
             position = CGPoint(x: frameSize.width, y: frameSize.height)
         }
         
-        // Debug: Print handle positioning info
-        print("🎯 HANDLE DEBUG - \(corner):")
-        print("  Frame size: \(frameSize)")
-        print("  Handle position (overlay coords): \(position)")
-        print("  Image position: \(doc.position)")
-        print("  Image original size: \(doc.original.size)")
-        print("  ---")
-        
         return position
     }
 }
@@ -857,7 +892,7 @@ struct ResizeHandle: View {
                     .stroke(Color.white, lineWidth: 2)
             )
             .shadow(radius: 2)
-            .highPriorityGesture(
+            .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         onDragStart()
@@ -866,12 +901,6 @@ struct ResizeHandle: View {
                     .onEnded { _ in
                         onDragEnd()
                     }
-            )
-            .simultaneousGesture(
-                // Prevent the parent drag gesture from interfering
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in }
-                    .onEnded { _ in }
             )
     }
 }
