@@ -34,6 +34,10 @@ struct ImageDoc: Identifiable, Hashable {
     var borderColor: Color
     /// Whether the image is visible in the canvas
     var isVisible: Bool = true
+    /// Frame duration for animation (in seconds)
+    var frameDuration: Double = 0.5
+    /// Animation order index (for reordering frames)
+    var animationOrder: Int = 0
     
     var aspectRatio: CGFloat {
         let s = original.size
@@ -73,6 +77,8 @@ struct PersistentImageDoc: Codable {
     let imageData: Data? // Store the actual image data
     let borderColorData: Data? // Store the border color as data
     let isVisible: Bool
+    let frameDuration: Double
+    let animationOrder: Int
     
     init(from doc: ImageDoc) {
         self.url = doc.url
@@ -81,6 +87,8 @@ struct PersistentImageDoc: Codable {
         self.originalSize = doc.originalSize
         self.lastAccessed = Date()
         self.isVisible = doc.isVisible
+        self.frameDuration = doc.frameDuration
+        self.animationOrder = doc.animationOrder
         
         // Try to get image data from the original image
         if let tiffData = doc.original.tiffRepresentation {
@@ -140,7 +148,9 @@ struct PersistentImageDoc: Codable {
             position: CGPoint(x: 400, y: 300),
             originalSize: originalSize,
             borderColor: borderColor,
-            isVisible: isVisible
+            isVisible: isVisible,
+            frameDuration: frameDuration,
+            animationOrder: animationOrder
         )
     }
 }
@@ -168,6 +178,11 @@ final class ImageWorkbench: ObservableObject {
     @Published var isRenaming: Bool = false
     @Published var renameText: String = ""
     
+    // Animation state
+    @Published var isAnimating: Bool = false
+    @Published var currentFrameIndex: Int = 0
+    @Published var animationTimer: Timer?
+    
     init() {
         loadHistory()
     }
@@ -175,6 +190,7 @@ final class ImageWorkbench: ObservableObject {
     enum LayoutMode: String, CaseIterable, Identifiable {
         case sideBySide = "Side by side"
         case overlay = "Overlay"
+        case animation = "Animation"
         var id: String { rawValue }
     }
     
@@ -200,7 +216,8 @@ final class ImageWorkbench: ObservableObject {
                 let start = CGSize(width: min(800, s.width), height: min(800 * (s.height / max(s.width, 1)), s.height))
                 let centerPosition = CGPoint(x: 400, y: 300) // Default center position
                 let borderColor = generateBorderColor(for: newDocs.count)
-                let doc = ImageDoc(url: url, name: url.lastPathComponent, original: img, displaySize: start, position: centerPosition, originalSize: s, borderColor: borderColor)
+                let animationOrder = docs.count + newDocs.count // Set animation order based on total count
+                let doc = ImageDoc(url: url, name: url.lastPathComponent, original: img, displaySize: start, position: centerPosition, originalSize: s, borderColor: borderColor, frameDuration: 0.5, animationOrder: animationOrder)
                 newDocs.append(doc)
                 addToHistory(doc)
             }
@@ -222,7 +239,8 @@ final class ImageWorkbench: ObservableObject {
                         let start = CGSize(width: min(800, s.width), height: min(800 * (s.height / max(s.width, 1)), s.height))
                         let centerPosition = CGPoint(x: 400, y: 300) // Default center position
                         let borderColor = self.generateBorderColor(for: self.docs.count)
-                        let doc = ImageDoc(url: nil, name: "Dropped Image", original: img, displaySize: start, position: centerPosition, originalSize: s, borderColor: borderColor)
+                        let animationOrder = self.docs.count
+                        let doc = ImageDoc(url: nil, name: "Dropped Image", original: img, displaySize: start, position: centerPosition, originalSize: s, borderColor: borderColor, frameDuration: 0.5, animationOrder: animationOrder)
                         self.docs.append(doc)
                         self.addToHistory(doc)
                         if self.focusedID == nil { self.focusedID = doc.id }
@@ -741,7 +759,9 @@ final class ImageWorkbench: ObservableObject {
                 displaySize: doc.displaySize,
                 position: CGPoint(x: 400, y: 300),
                 originalSize: doc.originalSize,
-                borderColor: borderColor
+                borderColor: borderColor,
+                frameDuration: doc.frameDuration,
+                animationOrder: doc.animationOrder
             )
             docs.append(newDoc)
             focusedID = newDoc.id
@@ -886,6 +906,125 @@ final class ImageWorkbench: ObservableObject {
                 docs.append(focusedDoc)
             }
         }
+    }
+    
+    // MARK: Animation functionality
+    func startAnimation() {
+        guard !docs.isEmpty else { return }
+        stopAnimation() // Stop any existing animation
+        
+        isAnimating = true
+        currentFrameIndex = 0
+        updateAnimationTimer()
+    }
+    
+    func stopAnimation() {
+        isAnimating = false
+        animationTimer?.invalidate()
+        animationTimer = nil
+    }
+    
+    func toggleAnimation() {
+        if isAnimating {
+            stopAnimation()
+        } else {
+            startAnimation()
+        }
+    }
+    
+    private func updateAnimationTimer() {
+        guard isAnimating && !docs.isEmpty else { return }
+        
+        let visibleDocs = docs.filter { $0.isVisible }.sorted { $0.animationOrder < $1.animationOrder }
+        guard !visibleDocs.isEmpty else { return }
+        
+        let currentDoc = visibleDocs[currentFrameIndex % visibleDocs.count]
+        let duration = currentDoc.frameDuration
+        
+        animationTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.advanceToNextFrame()
+            }
+        }
+    }
+    
+    private func advanceToNextFrame() {
+        guard isAnimating else { return }
+        
+        let visibleDocs = docs.filter { $0.isVisible }.sorted { $0.animationOrder < $1.animationOrder }
+        guard !visibleDocs.isEmpty else { return }
+        
+        currentFrameIndex = (currentFrameIndex + 1) % visibleDocs.count
+        updateAnimationTimer()
+    }
+    
+    func goToFrame(_ index: Int) {
+        let visibleDocs = docs.filter { $0.isVisible }.sorted { $0.animationOrder < $1.animationOrder }
+        guard !visibleDocs.isEmpty && index >= 0 && index < visibleDocs.count else { return }
+        
+        currentFrameIndex = index
+        if isAnimating {
+            updateAnimationTimer()
+        }
+    }
+    
+    func previousFrame() {
+        let visibleDocs = docs.filter { $0.isVisible }.sorted { $0.animationOrder < $1.animationOrder }
+        guard !visibleDocs.isEmpty else { return }
+        
+        currentFrameIndex = (currentFrameIndex - 1 + visibleDocs.count) % visibleDocs.count
+        if isAnimating {
+            updateAnimationTimer()
+        }
+    }
+    
+    func nextFrame() {
+        let visibleDocs = docs.filter { $0.isVisible }.sorted { $0.animationOrder < $1.animationOrder }
+        guard !visibleDocs.isEmpty else { return }
+        
+        currentFrameIndex = (currentFrameIndex + 1) % visibleDocs.count
+        if isAnimating {
+            updateAnimationTimer()
+        }
+    }
+    
+    func setFrameDuration(for id: ImageDoc.ID, duration: Double) {
+        guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
+        docs[idx].frameDuration = max(0.1, duration) // Minimum 0.1 seconds
+    }
+    
+    func reorderFrames(from source: IndexSet, to destination: Int) {
+        // Get visible docs sorted by animation order
+        let visibleDocs = docs.filter { $0.isVisible }.sorted { $0.animationOrder < $1.animationOrder }
+        
+        // Create a mapping of animation order to actual doc index
+        var orderToIndex: [Int: Int] = [:]
+        for (index, doc) in docs.enumerated() {
+            if doc.isVisible {
+                orderToIndex[doc.animationOrder] = index
+            }
+        }
+        
+        // Reorder the animation orders
+        var newOrders = visibleDocs.map { $0.animationOrder }
+        newOrders.move(fromOffsets: source, toOffset: destination)
+        
+        // Apply new orders to docs
+        for (i, doc) in visibleDocs.enumerated() {
+            if let docIndex = orderToIndex[doc.animationOrder] {
+                docs[docIndex].animationOrder = newOrders[i]
+            }
+        }
+    }
+    
+    func getCurrentFrame() -> ImageDoc? {
+        let visibleDocs = docs.filter { $0.isVisible }.sorted { $0.animationOrder < $1.animationOrder }
+        guard !visibleDocs.isEmpty else { return nil }
+        return visibleDocs[currentFrameIndex % visibleDocs.count]
+    }
+    
+    func getVisibleFrames() -> [ImageDoc] {
+        return docs.filter { $0.isVisible }.sorted { $0.animationOrder < $1.animationOrder }
     }
 }
 
@@ -1063,7 +1202,7 @@ struct ToolbarBar: View {
                 }
             }
             
-            // Bottom row: Overlay-specific controls (when in overlay mode)
+            // Bottom row: Mode-specific controls
             if vm.layout == .overlay {
                 HStack(spacing: 12) {
                     Toggle("Canvas Resize", isOn: $vm.canvasResizeMode)
@@ -1075,6 +1214,38 @@ struct ToolbarBar: View {
                     } label: {
                         Label("Restack", systemImage: "square.stack.3d.up")
                     }
+                    Spacer()
+                }
+            } else if vm.layout == .animation {
+                HStack(spacing: 12) {
+                    Button {
+                        vm.toggleAnimation()
+                    } label: {
+                        Label(vm.isAnimating ? "Pause" : "Play", systemImage: vm.isAnimating ? "pause.fill" : "play.fill")
+                    }
+                    .disabled(vm.docs.filter { $0.isVisible }.isEmpty)
+                    
+                    Button {
+                        vm.previousFrame()
+                    } label: {
+                        Label("Previous", systemImage: "backward.fill")
+                    }
+                    .disabled(vm.docs.filter { $0.isVisible }.isEmpty)
+                    
+                    Button {
+                        vm.nextFrame()
+                    } label: {
+                        Label("Next", systemImage: "forward.fill")
+                    }
+                    .disabled(vm.docs.filter { $0.isVisible }.isEmpty)
+                    
+                    if !vm.docs.filter { $0.isVisible }.isEmpty {
+                        let visibleFrames = vm.getVisibleFrames()
+                        Text("Frame \(vm.currentFrameIndex + 1) of \(visibleFrames.count)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    
                     Spacer()
                 }
             }
@@ -1126,6 +1297,8 @@ struct CanvasArea: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+            case .animation:
+                AnimationCanvas()
             }
         }
         .animation(.default, value: vm.layout)
@@ -1728,6 +1901,204 @@ struct Inspector: View {
         .onAppear {
             width = "\(Int(doc.displaySize.width))"
             height = "\(Int(doc.displaySize.height))"
+        }
+    }
+}
+
+// MARK: - Animation Views
+
+struct AnimationCanvas: View {
+    @EnvironmentObject var vm: ImageWorkbench
+    
+    var body: some View {
+        HStack(spacing: 0) {
+            // Main animation display area
+            GeometryReader { geo in
+                ZStack {
+                    // Background
+                    Color(nsColor: .underPageBackgroundColor)
+                    
+                    // Current frame
+                    if let currentFrame = vm.getCurrentFrame() {
+                        Image(nsImage: currentFrame.original)
+                            .resizable()
+                            .interpolation(.high)
+                            .antialiased(true)
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: geo.size.width * 0.8, maxHeight: geo.size.height * 0.8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.accentColor, lineWidth: 2)
+                            )
+                            .shadow(radius: 8)
+                    } else {
+                        VStack(spacing: 16) {
+                            Image(systemName: "photo.stack")
+                                .font(.system(size: 48))
+                                .foregroundStyle(.secondary)
+                            Text("No frames to animate")
+                                .font(.headline)
+                                .foregroundStyle(.secondary)
+                            Text("Load some images and make them visible to start animating")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                                .multilineTextAlignment(.center)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            
+            Divider()
+            
+            // Timeline panel
+            AnimationTimeline()
+                .frame(width: 300)
+        }
+    }
+}
+
+struct AnimationTimeline: View {
+    @EnvironmentObject var vm: ImageWorkbench
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header
+            HStack {
+                Text("Animation Timeline")
+                    .font(.headline)
+                Spacer()
+                if !vm.docs.filter { $0.isVisible }.isEmpty {
+                    Text("\(vm.getVisibleFrames().count) frames")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            
+            Divider()
+            
+            // Timeline list
+            if vm.getVisibleFrames().isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "photo.stack")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
+                    Text("No visible frames")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Text("Toggle visibility on images to add them to the animation")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(Array(vm.getVisibleFrames().enumerated()), id: \.element.id) { index, doc in
+                            AnimationFrameRow(
+                                doc: doc,
+                                index: index,
+                                isCurrentFrame: index == vm.currentFrameIndex
+                            )
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            
+            Spacer()
+        }
+        .padding()
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+}
+
+struct AnimationFrameRow: View {
+    @EnvironmentObject var vm: ImageWorkbench
+    let doc: ImageDoc
+    let index: Int
+    let isCurrentFrame: Bool
+    
+    @State private var durationText: String = ""
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            // Frame thumbnail
+            Image(nsImage: doc.original)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 40, height: 40)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(isCurrentFrame ? Color.accentColor : Color.secondary.opacity(0.3), lineWidth: isCurrentFrame ? 2 : 1)
+                )
+            
+            // Frame info
+            VStack(alignment: .leading, spacing: 2) {
+                Text(doc.name)
+                    .font(.caption)
+                    .lineLimit(1)
+                Text("\(Int(doc.frameDuration * 1000))ms")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            
+            Spacer()
+            
+            // Duration control
+            HStack(spacing: 4) {
+                Button {
+                    let newDuration = max(0.1, doc.frameDuration - 0.1)
+                    vm.setFrameDuration(for: doc.id, duration: newDuration)
+                } label: {
+                    Image(systemName: "minus")
+                        .font(.caption2)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .frame(width: 20, height: 20)
+                
+                TextField("Duration", text: $durationText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 50)
+                    .font(.caption2)
+                    .onSubmit {
+                        if let duration = Double(durationText) {
+                            vm.setFrameDuration(for: doc.id, duration: max(0.1, duration))
+                        }
+                    }
+                
+                Button {
+                    let newDuration = doc.frameDuration + 0.1
+                    vm.setFrameDuration(for: doc.id, duration: newDuration)
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.caption2)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .frame(width: 20, height: 20)
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isCurrentFrame ? Color.accentColor.opacity(0.1) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isCurrentFrame ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: 1)
+        )
+        .onTapGesture {
+            vm.goToFrame(index)
+        }
+        .onAppear {
+            durationText = String(format: "%.1f", doc.frameDuration)
+        }
+        .onChange(of: doc.frameDuration) { _, newValue in
+            durationText = String(format: "%.1f", newValue)
         }
     }
 }
