@@ -32,6 +32,8 @@ struct ImageDoc: Identifiable, Hashable {
     var originalSize: CGSize
     /// Border color for overlay mode (each image gets a different color)
     var borderColor: Color
+    /// Whether the image is visible in the canvas
+    var isVisible: Bool = true
     
     var aspectRatio: CGFloat {
         let s = original.size
@@ -70,6 +72,7 @@ struct PersistentImageDoc: Codable {
     let lastAccessed: Date
     let imageData: Data? // Store the actual image data
     let borderColorData: Data? // Store the border color as data
+    let isVisible: Bool
     
     init(from doc: ImageDoc) {
         self.url = doc.url
@@ -77,6 +80,7 @@ struct PersistentImageDoc: Codable {
         self.displaySize = doc.displaySize
         self.originalSize = doc.originalSize
         self.lastAccessed = Date()
+        self.isVisible = doc.isVisible
         
         // Try to get image data from the original image
         if let tiffData = doc.original.tiffRepresentation {
@@ -135,7 +139,8 @@ struct PersistentImageDoc: Codable {
             displaySize: displaySize,
             position: CGPoint(x: 400, y: 300),
             originalSize: originalSize,
-            borderColor: borderColor
+            borderColor: borderColor,
+            isVisible: isVisible
         )
     }
 }
@@ -356,6 +361,12 @@ final class ImageWorkbench: ObservableObject {
     func closeAllImages() {
         docs.removeAll()
         focusedID = nil
+    }
+    
+    // MARK: Visibility functionality
+    func toggleVisibility(for id: ImageDoc.ID) {
+        guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
+        docs[idx].isVisible.toggle()
     }
     
     // MARK: Size updates
@@ -925,6 +936,14 @@ struct Sidebar: View {
                         }
                         Spacer()
                         Button {
+                            vm.toggleVisibility(for: doc.id)
+                        } label: {
+                            Image(systemName: doc.isVisible ? "eye.fill" : "eye.slash.fill")
+                                .foregroundStyle(doc.isVisible ? .primary : .secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .opacity(0.7)
+                        Button {
                             vm.closeImage(doc.id)
                         } label: {
                             Image(systemName: "xmark.circle.fill")
@@ -1078,7 +1097,7 @@ struct CanvasArea: View {
             case .overlay:
                 GeometryReader { geo in
                     ZStack {
-                        ForEach(vm.docs.sorted { doc1, doc2 in
+                        ForEach(vm.docs.filter { $0.isVisible }.sorted { doc1, doc2 in
                             // Put focused image last (on top)
                             if vm.isFocused(doc1) { return false }
                             if vm.isFocused(doc2) { return true }
@@ -1089,7 +1108,7 @@ struct CanvasArea: View {
                         }
                         
                         // Position display for focused image
-                        if let focusedDoc = vm.docs.first(where: { vm.isFocused($0) }) {
+                        if let focusedDoc = vm.docs.first(where: { vm.isFocused($0) && $0.isVisible }) {
                             VStack {
                                 Spacer()
                                 HStack {
@@ -1124,7 +1143,7 @@ struct FlowGrid: View {
             GridItem(.adaptive(minimum: 300), spacing: 16)
         ]
         LazyHGrid(rows: rows, spacing: 16) {
-            ForEach(docs) { doc in
+            ForEach(docs.filter { $0.isVisible }) { doc in
                 VStack {
                     FocusableImage(doc: doc, maxSize: CGSize(width: 600, height: 600))
                     HStack {
