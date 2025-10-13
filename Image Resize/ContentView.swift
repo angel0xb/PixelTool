@@ -132,6 +132,8 @@ final class ImageWorkbench: ObservableObject {
     @Published var history: [ImageDoc] = []
     @Published var dragOffset: CGSize = .zero
     @Published var isDragging: Bool = false
+    @Published var isRenaming: Bool = false
+    @Published var renameText: String = ""
     
     init() {
         loadHistory()
@@ -208,7 +210,9 @@ final class ImageWorkbench: ObservableObject {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [format.uti]
         panel.canCreateDirectories = true
-        let base = (focused.url?.deletingPathExtension().lastPathComponent ?? focused.name)
+        // Use the current name (which may have been renamed) instead of the original filename
+        // Strip any existing extension before adding the new one
+        let base = URL(fileURLWithPath: focused.name).deletingPathExtension().lastPathComponent
         panel.nameFieldStringValue = base + format.suggestedExtension
         panel.begin { resp in
             guard resp == .OK, let dest = panel.url else { return }
@@ -243,7 +247,9 @@ final class ImageWorkbench: ObservableObject {
                 var failedCount = 0
                 
                 for doc in modifiedDocs {
-                    let baseName = (doc.url?.deletingPathExtension().lastPathComponent ?? doc.name)
+                    // Use the current name (which may have been renamed) instead of the original filename
+                    // Strip any existing extension before adding the new one
+                    let baseName = URL(fileURLWithPath: doc.name).deletingPathExtension().lastPathComponent
                     let fileName = baseName + format.suggestedExtension
                     let fileURL = folderURL.appendingPathComponent(fileName)
                     
@@ -284,6 +290,30 @@ final class ImageWorkbench: ObservableObject {
     // MARK: Focus helpers
     func focus(_ id: ImageDoc.ID) { focusedID = id }
     func isFocused(_ doc: ImageDoc) -> Bool { focusedID == doc.id }
+    
+    // MARK: Rename functionality
+    func startRenaming(_ doc: ImageDoc) {
+        isRenaming = true
+        renameText = doc.name
+    }
+    
+    func confirmRename() {
+        guard let focusedID = focusedID,
+              let idx = docs.firstIndex(where: { $0.id == focusedID }),
+              !renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            cancelRename()
+            return
+        }
+        
+        docs[idx].name = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        isRenaming = false
+        renameText = ""
+    }
+    
+    func cancelRename() {
+        isRenaming = false
+        renameText = ""
+    }
     
     // MARK: Close functionality
     func closeImage(_ id: ImageDoc.ID) {
@@ -1255,7 +1285,43 @@ struct Inspector: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(doc.name).font(.headline).lineLimit(2)
+            // Editable name field
+            HStack {
+                if vm.isRenaming && vm.focusedID == doc.id {
+                    TextField("Image name", text: $vm.renameText)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit {
+                            vm.confirmRename()
+                        }
+                        .onExitCommand {
+                            vm.cancelRename()
+                        }
+                } else {
+                    Text(doc.name).font(.headline).lineLimit(2)
+                    Spacer()
+                    Button {
+                        vm.startRenaming(doc)
+                    } label: {
+                        Image(systemName: "pencil")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .onKeyPress(.return) {
+                if vm.isRenaming {
+                    vm.confirmRename()
+                    return .handled
+                }
+                return .ignored
+            }
+            .onKeyPress(.escape) {
+                if vm.isRenaming {
+                    vm.cancelRename()
+                    return .handled
+                }
+                return .ignored
+            }
             
             LabeledContent("Original") {
                 Text("\(Int(doc.original.size.width))×\(Int(doc.original.size.height))")
