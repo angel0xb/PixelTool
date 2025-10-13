@@ -450,34 +450,45 @@ final class ImageWorkbench: ObservableObject {
         
         var canvasSize = doc.canvasSize!
         var imageOffset = doc.imageOffset
+        var position = doc.position
         
-        // Like Procreate: the image stays at its fixed position,
-        // and we're adjusting the canvas boundaries around it
+        // Like Procreate: the image stays at its fixed visual position,
+        // When the canvas grows, it grows from center. We need to:
+        // 1. Move the canvas position to compensate for center-based growth
+        // 2. Adjust image offset within canvas to maintain visual position
         switch edge {
         case .top:
-            // Drag up = expand canvas (add space on top)
-            // Drag down = shrink canvas (crop from top)
-            let heightDelta = -delta.height
-            canvasSize.height = max(50, canvasSize.height + heightDelta)
-            // Move image down when expanding top, up when shrinking
-            imageOffset.y += heightDelta
+            // Drag up (negative delta) = expand canvas upward
+            let oldHeight = canvasSize.height
+            canvasSize.height = max(50, canvasSize.height - delta.height)
+            let actualDelta = canvasSize.height - oldHeight
+            // Move canvas up to counter the growth (negative delta means growing up)
+            position.y -= actualDelta / 2
+            // Also adjust image offset to compensate for canvas growth from top
+            imageOffset.y += actualDelta
         case .bottom:
-            // Drag down = expand canvas (add space on bottom)
-            // Drag up = shrink canvas (crop from bottom)
+            // Drag down (positive delta) = expand canvas downward
+            let oldHeight = canvasSize.height
             canvasSize.height = max(50, canvasSize.height + delta.height)
-            // Image offset doesn't change - just the canvas bottom edge moves
+            let actualDelta = canvasSize.height - oldHeight
+            // Canvas grows from center, so move canvas position by half
+            position.y += actualDelta / 2
         case .left:
-            // Drag left = expand canvas (add space on left)
-            // Drag right = shrink canvas (crop from left)
-            let widthDelta = -delta.width
-            canvasSize.width = max(50, canvasSize.width + widthDelta)
-            // Move image right when expanding left, left when shrinking
-            imageOffset.x += widthDelta
+            // Drag left (negative delta) = expand canvas leftward
+            let oldWidth = canvasSize.width
+            canvasSize.width = max(50, canvasSize.width - delta.width)
+            let actualDelta = canvasSize.width - oldWidth
+            // Move canvas left to counter the growth (negative delta means growing left)
+            position.x -= actualDelta / 2
+            // Also adjust image offset to compensate for canvas growth from left
+            imageOffset.x += actualDelta
         case .right:
-            // Drag right = expand canvas (add space on right)
-            // Drag left = shrink canvas (crop from right)
+            // Drag right (positive delta) = expand canvas rightward
+            let oldWidth = canvasSize.width
             canvasSize.width = max(50, canvasSize.width + delta.width)
-            // Image offset doesn't change - just the canvas right edge moves
+            let actualDelta = canvasSize.width - oldWidth
+            // Canvas grows from center, so move canvas position by half
+            position.x += actualDelta / 2
         }
         
         // Don't apply aspect ratio constraints in canvas resize mode
@@ -495,6 +506,7 @@ final class ImageWorkbench: ObservableObject {
         
         doc.canvasSize = canvasSize
         doc.imageOffset = imageOffset
+        doc.position = position
         docs[idx] = doc
     }
     
