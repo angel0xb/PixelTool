@@ -13,6 +13,34 @@ import UniformTypeIdentifiers
 
 // MARK: - Model
 
+enum AnchorPoint: String, CaseIterable, Identifiable {
+    case topLeft = "Top Left"
+    case topCenter = "Top Center"
+    case topRight = "Top Right"
+    case centerLeft = "Center Left"
+    case center = "Center"
+    case centerRight = "Center Right"
+    case bottomLeft = "Bottom Left"
+    case bottomCenter = "Bottom Center"
+    case bottomRight = "Bottom Right"
+    
+    var id: String { rawValue }
+    
+    var offset: CGPoint {
+        switch self {
+        case .topLeft: return CGPoint(x: 0, y: 0)
+        case .topCenter: return CGPoint(x: 0.5, y: 0)
+        case .topRight: return CGPoint(x: 1, y: 0)
+        case .centerLeft: return CGPoint(x: 0, y: 0.5)
+        case .center: return CGPoint(x: 0.5, y: 0.5)
+        case .centerRight: return CGPoint(x: 1, y: 0.5)
+        case .bottomLeft: return CGPoint(x: 0, y: 1)
+        case .bottomCenter: return CGPoint(x: 0.5, y: 1)
+        case .bottomRight: return CGPoint(x: 1, y: 1)
+        }
+    }
+}
+
 struct ImageDoc: Identifiable, Hashable {
     let id = UUID()
     var url: URL?
@@ -38,6 +66,12 @@ struct ImageDoc: Identifiable, Hashable {
     var frameDuration: Double = 0.5
     /// Animation order index (for reordering frames)
     var animationOrder: Int = 0
+    /// Anchor point for placement mode (where the position refers to on the image)
+    var anchorPoint: AnchorPoint = .center
+    /// Whether the image is flipped horizontally
+    var flipX: Bool = false
+    /// Whether the image is flipped vertically
+    var flipY: Bool = false
     
     var aspectRatio: CGFloat {
         let s = original.size
@@ -46,7 +80,14 @@ struct ImageDoc: Identifiable, Hashable {
     
     /// Returns the image resized to the current display size
     var resizedImage: NSImage {
-        return original.resized(to: displaySize, keepAspect: true) ?? original
+        let resized = original.resized(to: displaySize, keepAspect: true) ?? original
+        
+        // Apply flip transformations if needed
+        if flipX || flipY {
+            return resized.flipped(horizontal: flipX, vertical: flipY) ?? resized
+        }
+        
+        return resized
     }
     
     /// Returns true if the image has been modified from its original state
@@ -68,7 +109,10 @@ struct ImageDoc: Identifiable, Hashable {
         // Check if canvas resize has been used
         let canvasChanged = canvasSize != nil
         
-        return sizeChanged || positionChanged || opacityChanged || canvasChanged
+        // Check if image has been flipped
+        let flipChanged = flipX || flipY
+        
+        return sizeChanged || positionChanged || opacityChanged || canvasChanged || flipChanged
     }
 }
 
@@ -178,6 +222,8 @@ final class ImageWorkbench: ObservableObject {
     }
     @Published var showBorders = false
     @Published var showAsTemplate = false
+    @Published var baseImageID: ImageDoc.ID? = nil
+    @Published var showCoordinates = true
     @Published var history: [ImageDoc] = []
     @Published var dragOffset: CGSize = .zero
     @Published var isDragging: Bool = false
@@ -197,6 +243,7 @@ final class ImageWorkbench: ObservableObject {
         case sideBySide = "Side by side"
         case overlay = "Overlay"
         case animation = "Animation"
+        case placement = "Placement"
         var id: String { rawValue }
     }
     
@@ -418,6 +465,18 @@ final class ImageWorkbench: ObservableObject {
     func setOpacity(for id: ImageDoc.ID, _ value: Double) {
         guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
         docs[idx].overlayOpacity = value
+    }
+    
+    func flipX(for id: ImageDoc.ID) {
+        guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
+        docs[idx].flipX.toggle()
+        print("Flipped X for \(docs[idx].name): \(docs[idx].flipX)")
+    }
+    
+    func flipY(for id: ImageDoc.ID) {
+        guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
+        docs[idx].flipY.toggle()
+        print("Flipped Y for \(docs[idx].name): \(docs[idx].flipY)")
     }
     
     // MARK: Position updates
@@ -1109,6 +1168,53 @@ final class ImageWorkbench: ObservableObject {
     func getVisibleFrames() -> [ImageDoc] {
         return docs.filter { $0.isVisible }.sorted { $0.animationOrder < $1.animationOrder }
     }
+    
+    // MARK: Placement mode functionality
+    func setBaseImage(_ id: ImageDoc.ID) {
+        baseImageID = id
+    }
+    
+    func getBaseImage() -> ImageDoc? {
+        guard let baseID = baseImageID else { return nil }
+        return docs.first { $0.id == baseID }
+    }
+    
+    func getOverlayImages() -> [ImageDoc] {
+        guard let baseID = baseImageID else { return docs.filter { $0.isVisible } }
+        return docs.filter { $0.id != baseID && $0.isVisible }
+    }
+    
+    func setAnchorPoint(for id: ImageDoc.ID, anchor: AnchorPoint) {
+        guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
+        docs[idx].anchorPoint = anchor
+    }
+    
+    func moveLayerUp(_ id: ImageDoc.ID) {
+        guard let currentIndex = docs.firstIndex(where: { $0.id == id }),
+              currentIndex < docs.count - 1 else { return }
+        docs.swapAt(currentIndex, currentIndex + 1)
+    }
+    
+    func moveLayerDown(_ id: ImageDoc.ID) {
+        guard let currentIndex = docs.firstIndex(where: { $0.id == id }),
+              currentIndex > 0 else { return }
+        docs.swapAt(currentIndex, currentIndex - 1)
+    }
+    
+    func getRelativePosition(for doc: ImageDoc) -> CGPoint {
+        guard let baseImage = getBaseImage() else { return doc.position }
+        
+        // Calculate position relative to base image
+        let anchorOffset = CGPoint(
+            x: doc.displaySize.width * doc.anchorPoint.offset.x,
+            y: doc.displaySize.height * doc.anchorPoint.offset.y
+        )
+        
+        return CGPoint(
+            x: doc.position.x - baseImage.position.x - anchorOffset.x,
+            y: doc.position.y - baseImage.position.y - anchorOffset.y
+        )
+    }
 }
 
 // MARK: - App
@@ -1333,6 +1439,42 @@ struct ToolbarBar: View {
                     
                     Spacer()
                 }
+            } else if vm.layout == .placement {
+                HStack(spacing: 12) {
+                    if !vm.docs.isEmpty {
+                        Picker("Base Image", selection: Binding(
+                            get: { vm.baseImageID ?? vm.docs.first?.id ?? UUID() },
+                            set: { vm.setBaseImage($0) }
+                        )) {
+                            ForEach(vm.docs) { doc in
+                                Text(doc.name).tag(doc.id)
+                            }
+                        }
+                        .frame(width: 200)
+                        
+                        // Base image anchor point picker
+                        if let baseImage = vm.getBaseImage() {
+                            HStack(spacing: 4) {
+                                Text("Anchor:")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Picker("Base Anchor", selection: Binding(
+                                    get: { baseImage.anchorPoint },
+                                    set: { vm.setAnchorPoint(for: baseImage.id, anchor: $0) }
+                                )) {
+                                    ForEach(AnchorPoint.allCases) { anchor in
+                                        Text(anchor.rawValue).tag(anchor)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .frame(width: 100)
+                            }
+                        }
+                    }
+                    Toggle("Show Coordinates", isOn: $vm.showCoordinates)
+                        .toggleStyle(.switch)
+                    Spacer()
+                }
             }
         }
         .padding(10)
@@ -1384,6 +1526,8 @@ struct CanvasArea: View {
                 }
             case .animation:
                 AnimationCanvas()
+            case .placement:
+                PlacementCanvas()
             }
         }
         .animation(.default, value: vm.layout)
@@ -1841,6 +1985,40 @@ struct Inspector: View {
                 }
             }
             
+            // Flip controls
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Flip")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                
+                HStack(spacing: 8) {
+                    Button {
+                        vm.flipX(for: doc.id)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.left.and.right")
+                            Text("Flip X")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .foregroundStyle(doc.flipX ? Color.accentColor : .primary)
+                    
+                    Button {
+                        vm.flipY(for: doc.id)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.up.and.down")
+                            Text("Flip Y")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .foregroundStyle(doc.flipY ? Color.accentColor : .primary)
+                }
+            }
+            .padding(.vertical, 4)
+            
             // Canvas resize increment/decrement buttons
             if vm.canvasResizeMode && vm.layout == .overlay {
                 VStack(alignment: .leading, spacing: 8) {
@@ -1977,6 +2155,40 @@ struct Inspector: View {
                         get: { doc.overlayOpacity },
                         set: { vm.setOpacity(for: doc.id, $0) }
                     ), in: 0...1)
+                }
+            }
+            
+            if vm.layout == .placement {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Anchor Point")
+                        Spacer()
+                        Picker("Anchor", selection: Binding(
+                            get: { doc.anchorPoint },
+                            set: { vm.setAnchorPoint(for: doc.id, anchor: $0) }
+                        )) {
+                            ForEach(AnchorPoint.allCases) { anchor in
+                                Text(anchor.rawValue).tag(anchor)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 120)
+                    }
+                    
+                    if let baseImage = vm.getBaseImage() {
+                        let relativePos = vm.getRelativePosition(for: doc)
+                        LabeledContent("Relative Position") {
+                            Text("(\(Int(relativePos.x)), \(Int(relativePos.y)))")
+                        }
+                        LabeledContent("Base Image") {
+                            Text(baseImage.name)
+                        }
+                    }
+                    
+                    HStack {
+                        Button("Move Up") { vm.moveLayerUp(doc.id) }
+                        Button("Move Down") { vm.moveLayerDown(doc.id) }
+                    }
                 }
             }
             
@@ -2340,6 +2552,174 @@ struct FrameCornerIndicator: View {
     }
 }
 
+// MARK: - Placement Views
+
+struct PlacementCanvas: View {
+    @EnvironmentObject var vm: ImageWorkbench
+    
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                // Background
+                Color(nsColor: .underPageBackgroundColor)
+                
+                if let baseImage = vm.getBaseImage() {
+                    // Base image (background)
+                    Image(nsImage: baseImage.resizedImage)
+                        .resizable()
+                        .interpolation(.high)
+                        .antialiased(true)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: geo.size.width * 0.8, maxHeight: geo.size.height * 0.8)
+                        .overlay(
+                            Rectangle()
+                                .stroke(Color.blue, lineWidth: 3)
+                        )
+                        .overlay(
+                            VStack {
+                                HStack {
+                                    Text("BASE: \(baseImage.name)")
+                                        .font(.caption)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                                    Spacer()
+                                }
+                                Spacer()
+                            }
+                            .padding(8)
+                        )
+                    
+                    // Overlay images (sprites/assets)
+                    ForEach(vm.getOverlayImages()) { doc in
+                        PlacementImage(doc: doc, baseImage: baseImage, maxSize: geo.size)
+                    }
+                } else {
+                    VStack(spacing: 16) {
+                        Image(systemName: "photo.stack")
+                            .font(.system(size: 48))
+                            .foregroundStyle(.secondary)
+                        Text("No Base Image Selected")
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+                        Text("Select a base image from the dropdown above")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+struct PlacementImage: View {
+    @EnvironmentObject var vm: ImageWorkbench
+    let doc: ImageDoc
+    let baseImage: ImageDoc
+    let maxSize: CGSize
+    
+    @State private var isDragging: Bool = false
+    @State private var dragStartPosition: CGPoint = .zero
+    
+    var body: some View {
+        let isFocused = vm.isFocused(doc)
+        let currentPosition = doc.position
+        let relativePosition = vm.getRelativePosition(for: doc)
+        
+        return Image(nsImage: doc.resizedImage)
+            .renderingMode(vm.showAsTemplate ? .template : .original)
+            .resizable()
+            .interpolation(.high)
+            .antialiased(true)
+            .aspectRatio(contentMode: .fit)
+            .frame(width: doc.displaySize.width, height: doc.displaySize.height)
+            .foregroundColor(vm.showAsTemplate ? doc.borderColor : nil)
+            .overlay(
+                // Anchor point indicator
+                Circle()
+                    .fill(Color.red)
+                    .frame(width: 8, height: 8)
+                    .offset(
+                        x: (doc.anchorPoint.offset.x - 0.5) * doc.displaySize.width,
+                        y: (doc.anchorPoint.offset.y - 0.5) * doc.displaySize.height
+                    )
+            )
+            .overlay(
+                // Selection border
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(isFocused ? Color.accentColor : doc.borderColor, lineWidth: isFocused ? 3 : 2)
+            )
+            .overlay(
+                // Position info
+                VStack {
+                    HStack {
+                        if vm.showCoordinates {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("\(doc.name)")
+                                    .font(.caption2)
+                                    .fontWeight(.bold)
+                                    .lineLimit(1)
+                                Text("Rel: (\(Int(relativePosition.x)), \(Int(relativePosition.y)))")
+                                    .font(.caption2)
+                                Text("Abs: (\(Int(currentPosition.x)), \(Int(currentPosition.y)))")
+                                    .font(.caption2)
+                                Text("Anchor: \(doc.anchorPoint.rawValue)")
+                                    .font(.caption2)
+                                    .lineLimit(1)
+                            }
+                            .padding(3)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                            .frame(maxWidth: 120)
+                        }
+                        Spacer()
+                    }
+                    Spacer()
+                }
+                .padding(2)
+            )
+            .shadow(radius: isFocused ? 8 : 4)
+            .onTapGesture { vm.focus(doc.id) }
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                    .onChanged { value in
+                        if !isDragging {
+                            isDragging = true
+                            dragStartPosition = doc.position
+                            vm.focus(doc.id) // Focus the image when starting to drag
+                        }
+                        
+                        let newPosition = CGPoint(
+                            x: dragStartPosition.x + value.translation.width,
+                            y: dragStartPosition.y + value.translation.height
+                        )
+                        
+                        vm.updatePosition(for: doc.id, newPosition)
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                    }
+            )
+            .contextMenu {
+                Button("Focus") { vm.focus(doc.id) }
+                Button("Move Up") { vm.moveLayerUp(doc.id) }
+                Button("Move Down") { vm.moveLayerDown(doc.id) }
+                Divider()
+                Menu("Anchor Point") {
+                    ForEach(AnchorPoint.allCases) { anchor in
+                        Button(anchor.rawValue) {
+                            vm.setAnchorPoint(for: doc.id, anchor: anchor)
+                        }
+                    }
+                }
+                Divider()
+                Button("Close") { vm.closeImage(doc.id) }
+            }
+            .position(currentPosition)
+    }
+}
+
 // MARK: - NSImage utilities
 
 extension NSImage {
@@ -2364,6 +2744,44 @@ extension NSImage {
         return img
     }
     
+    func flipped(horizontal: Bool, vertical: Bool) -> NSImage? {
+        guard horizontal || vertical else { return self }
+        print("Flipping image: horizontal=\(horizontal), vertical=\(vertical)")
+        
+        let img = NSImage(size: size)
+        img.lockFocus()
+        defer { img.unlockFocus() }
+        
+        let context = NSGraphicsContext.current!
+        context.saveGraphicsState()
+        
+        // Apply transformations
+        var transform = NSAffineTransform()
+        
+        // Handle both flips together
+        if horizontal && vertical {
+            // Flip both: translate to corner, then scale both axes
+            transform.translateX(by: size.width, yBy: size.height)
+            transform.scaleX(by: -1, yBy: -1)
+        } else if horizontal {
+            // Flip horizontally: translate right, then scale X
+            transform.translateX(by: size.width, yBy: 0)
+            transform.scaleX(by: -1, yBy: 1)
+        } else if vertical {
+            // Flip vertically: translate up, then scale Y
+            transform.translateX(by: 0, yBy: size.height)
+            transform.scaleX(by: 1, yBy: -1)
+        }
+        
+        transform.concat()
+        
+        // Draw the image
+        let rect = CGRect(origin: .zero, size: size)
+        self.draw(in: rect, from: .zero, operation: .copy, fraction: 1.0)
+        
+        context.restoreGraphicsState()
+        return img
+    }
     
     func data(for format: ImageWorkbench.SaveFormat, compression: Double = 0.92) -> Data? {
         guard let tiff = self.tiffRepresentation,
