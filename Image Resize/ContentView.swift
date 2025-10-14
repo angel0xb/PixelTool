@@ -2601,6 +2601,62 @@ struct PlacementCanvas: View {
                             )
                         )
                         .overlay(
+                            // Coordinate text overlays
+                            VStack {
+                                HStack {
+                                    // Top-left corner coordinates
+                                    VStack {
+                                        Text("(0, 0)")
+                                            .font(.caption2)
+                                            .fontWeight(.semibold)
+                                            .foregroundColor(.blue)
+                                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                                            .padding(2)
+                                        Spacer()
+                                    }
+                                    Spacer()
+                                    // Top-right corner coordinates
+                                    VStack {
+                                        Text("(\(Int(min(geo.size.width * 0.8, baseImage.resizedImage.size.width * (geo.size.height * 0.8 / baseImage.resizedImage.size.height)))), 0)")
+                                            .font(.caption2)
+                                            .fontWeight(.semibold)
+                                            .foregroundColor(.blue)
+                                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                                            .padding(2)
+                                        Spacer()
+                                    }
+                                }
+                                Spacer()
+                                HStack {
+                                    // Bottom-left corner coordinates
+                                    VStack {
+                                        Spacer()
+                                        Text("(0, \(Int(min(geo.size.height * 0.8, baseImage.resizedImage.size.height * (geo.size.width * 0.8 / baseImage.resizedImage.size.width)))))")
+                                            .font(.caption2)
+                                            .fontWeight(.semibold)
+                                            .foregroundColor(.blue)
+                                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                                            .padding(2)
+                                    }
+                                    Spacer()
+                                    // Bottom-right corner coordinates
+                                    VStack {
+                                        Spacer()
+                                        Text("(\(Int(min(geo.size.width * 0.8, baseImage.resizedImage.size.width * (geo.size.height * 0.8 / baseImage.resizedImage.size.height)))), \(Int(min(geo.size.height * 0.8, baseImage.resizedImage.size.height * (geo.size.width * 0.8 / baseImage.resizedImage.size.width)))))")
+                                            .font(.caption2)
+                                            .fontWeight(.semibold)
+                                            .foregroundColor(.blue)
+                                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                                            .padding(2)
+                                    }
+                                }
+                            }
+                            .frame(
+                                width: min(geo.size.width * 0.8, baseImage.resizedImage.size.width * (geo.size.height * 0.8 / baseImage.resizedImage.size.height)),
+                                height: min(geo.size.height * 0.8, baseImage.resizedImage.size.height * (geo.size.width * 0.8 / baseImage.resizedImage.size.width))
+                            )
+                        )
+                        .overlay(
                             VStack {
                                 HStack {
                                     Text("BASE: \(baseImage.name)")
