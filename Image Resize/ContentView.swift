@@ -44,6 +44,11 @@ struct ImageDoc: Identifiable, Hashable {
         return s.height == 0 ? 1 : s.width / s.height
     }
     
+    /// Returns the image resized to the current display size
+    var resizedImage: NSImage {
+        return original.resized(to: displaySize, keepAspect: true) ?? original
+    }
+    
     /// Returns true if the image has been modified from its original state
     var isModified: Bool {
         // Check if display size differs from original size (with small tolerance for floating point precision)
@@ -172,6 +177,7 @@ final class ImageWorkbench: ObservableObject {
         }
     }
     @Published var showBorders = false
+    @Published var showAsTemplate = false
     @Published var history: [ImageDoc] = []
     @Published var dragOffset: CGSize = .zero
     @Published var isDragging: Bool = false
@@ -1286,6 +1292,8 @@ struct ToolbarBar: View {
                         .toggleStyle(.switch)
                     Toggle("Show Borders", isOn: $vm.showBorders)
                         .toggleStyle(.switch)
+                    Toggle("Show as Template", isOn: $vm.showAsTemplate)
+                        .toggleStyle(.switch)
                     Button {
                         vm.restackImages()
                     } label: {
@@ -1430,11 +1438,13 @@ struct FocusableImage: View {
                           height: min(doc.displaySize.height * liveScale, maxSize.height))
         
         return Image(nsImage: doc.original)
+            .renderingMode(vm.showAsTemplate ? .template : .original)
             .resizable()
             .interpolation(.high)
             .antialiased(true)
             .aspectRatio(contentMode: .fit)
             .frame(width: size.width, height: size.height)
+            .foregroundColor(vm.showAsTemplate ? doc.borderColor : nil)
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(isFocused ? Color.accentColor : .clear, lineWidth: 2)
@@ -1486,6 +1496,9 @@ struct DraggableResizableImage: View {
         // Use canvas size only when in canvas resize mode, otherwise use display size
         let frameSize = vm.canvasResizeMode ? (doc.canvasSize ?? doc.displaySize) : doc.displaySize
         
+        // Get the appropriate image (template or original)
+        let displayImage = doc.original
+        
         // Debug logging
         if vm.canvasResizeMode {
             print("🔍 CANVAS SIZE DEBUG - Canvas: \(doc.canvasSize?.width ?? 0)x\(doc.canvasSize?.height ?? 0), Display: \(doc.displaySize.width)x\(doc.displaySize.height), Frame: \(frameSize.width)x\(frameSize.height)")
@@ -1498,23 +1511,27 @@ struct DraggableResizableImage: View {
                 .frame(width: frameSize.width, height: frameSize.height)
             
             // The image, positioned within the canvas
-            Image(nsImage: doc.original)
+            Image(nsImage: displayImage)
+                .renderingMode(vm.showAsTemplate ? .template : .original)
                 .resizable()
                 .interpolation(.high)
                 .antialiased(true)
                 .aspectRatio(contentMode: .fit)
                 .frame(width: doc.displaySize.width, height: doc.displaySize.height)
                 .offset(x: doc.imageOffset.x, y: doc.imageOffset.y)
+                .foregroundColor(vm.showAsTemplate ? doc.borderColor : nil)
         }
         .frame(width: frameSize.width, height: frameSize.height)
         .clipped()
             .overlay(
+                // Frame border (only when showBorders is enabled and showAsTemplate is disabled, or when focused)
+                (!vm.showAsTemplate && vm.showBorders) || isFocused ? 
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(
-                        isFocused ? Color.accentColor : 
-                        (vm.showBorders ? doc.borderColor : .clear), 
+                        isFocused ? Color.accentColor : doc.borderColor, 
                         lineWidth: 2
                     )
+                : nil
             )
             .overlay(
                 // Resize handles - corners for normal mode, edges for canvas mode
@@ -1999,19 +2016,21 @@ struct AnimationCanvas: View {
                     if let currentFrame = vm.getCurrentFrame() {
                         ZStack {
                             // Image with proper frame border
-                            Image(nsImage: currentFrame.original)
+                            Image(nsImage: currentFrame.resizedImage)
+                                .renderingMode(vm.showAsTemplate ? .template : .original)
                                 .resizable()
                                 .interpolation(.high)
                                 .antialiased(true)
                                 .aspectRatio(contentMode: .fit)
                                 .frame(maxWidth: geo.size.width * 0.8, maxHeight: geo.size.height * 0.8)
+                                .foregroundColor(vm.showAsTemplate ? currentFrame.borderColor : nil)
                                 .overlay(
                                     // Frame border that matches the actual image dimensions
                                     Rectangle()
                                         .stroke(Color.accentColor, lineWidth: 3)
                                         .frame(
-                                            width: min(geo.size.width * 0.8, currentFrame.original.size.width * (geo.size.height * 0.8 / currentFrame.original.size.height)),
-                                            height: min(geo.size.height * 0.8, currentFrame.original.size.height * (geo.size.width * 0.8 / currentFrame.original.size.width))
+                                            width: min(geo.size.width * 0.8, currentFrame.resizedImage.size.width * (geo.size.height * 0.8 / currentFrame.resizedImage.size.height)),
+                                            height: min(geo.size.height * 0.8, currentFrame.resizedImage.size.height * (geo.size.width * 0.8 / currentFrame.resizedImage.size.width))
                                         )
                                 )
                                 .overlay(
@@ -2030,8 +2049,8 @@ struct AnimationCanvas: View {
                                         }
                                     }
                                     .frame(
-                                        width: min(geo.size.width * 0.8, currentFrame.original.size.width * (geo.size.height * 0.8 / currentFrame.original.size.height)),
-                                        height: min(geo.size.height * 0.8, currentFrame.original.size.height * (geo.size.width * 0.8 / currentFrame.original.size.width))
+                                        width: min(geo.size.width * 0.8, currentFrame.resizedImage.size.width * (geo.size.height * 0.8 / currentFrame.resizedImage.size.height)),
+                                        height: min(geo.size.height * 0.8, currentFrame.resizedImage.size.height * (geo.size.width * 0.8 / currentFrame.resizedImage.size.width))
                                     )
                                 )
                                 .shadow(radius: 8)
@@ -2048,7 +2067,7 @@ struct AnimationCanvas: View {
                                                 .padding(.vertical, 4)
                                                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
                                             
-                                            Text("\(Int(currentFrame.original.size.width))×\(Int(currentFrame.original.size.height))")
+                                            Text("\(Int(currentFrame.resizedImage.size.width))×\(Int(currentFrame.resizedImage.size.height))")
                                                 .font(.caption2)
                                                 .padding(.horizontal, 8)
                                                 .padding(.vertical, 2)
@@ -2175,11 +2194,13 @@ struct AnimationFrameRow: View {
                 .frame(width: 16)
             
             // Frame thumbnail with proper frame border
-            Image(nsImage: doc.original)
+            Image(nsImage: doc.resizedImage)
+                .renderingMode(vm.showAsTemplate ? .template : .original)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(width: 40, height: 40)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
+                .foregroundColor(vm.showAsTemplate ? doc.borderColor : nil)
                 .overlay(
                     RoundedRectangle(cornerRadius: 4)
                         .stroke(
@@ -2193,7 +2214,7 @@ struct AnimationFrameRow: View {
                 Text(doc.name)
                     .font(.caption)
                     .lineLimit(1)
-                Text("\(Int(doc.original.size.width))×\(Int(doc.original.size.height))")
+                Text("\(Int(doc.resizedImage.size.width))×\(Int(doc.resizedImage.size.height))")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Text("\(Int(doc.frameDuration * 1000))ms")
@@ -2342,6 +2363,7 @@ extension NSImage {
         self.draw(in: rect, from: .zero, operation: .copy, fraction: 1.0)
         return img
     }
+    
     
     func data(for format: ImageWorkbench.SaveFormat, compression: Double = 0.92) -> Data? {
         guard let tiff = self.tiffRepresentation,
