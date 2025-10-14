@@ -2562,25 +2562,57 @@ struct PlacementCanvas: View {
                 Color(nsColor: .underPageBackgroundColor)
                 
                 if let baseImage = vm.getBaseImage() {
-                    // Base image (background)
+                    // Base image (background) - positioned at its actual position
                     Image(nsImage: baseImage.resizedImage)
+                        .renderingMode(vm.showAsTemplate ? .template : .original)
                         .resizable()
                         .interpolation(.high)
                         .antialiased(true)
                         .aspectRatio(contentMode: .fit)
                         .frame(maxWidth: geo.size.width * 0.8, maxHeight: geo.size.height * 0.8)
+                        .foregroundColor(vm.showAsTemplate ? baseImage.borderColor : nil)
                         .overlay(
+                            // Frame border that matches the actual rendered image dimensions
                             Rectangle()
                                 .stroke(Color.blue, lineWidth: 3)
+                                .frame(
+                                    width: min(geo.size.width * 0.8, baseImage.resizedImage.size.width * (geo.size.height * 0.8 / baseImage.resizedImage.size.height)),
+                                    height: min(geo.size.height * 0.8, baseImage.resizedImage.size.height * (geo.size.width * 0.8 / baseImage.resizedImage.size.width))
+                                )
+                        )
+                        .overlay(
+                            // Corner indicators for frame boundaries
+                            VStack {
+                                HStack {
+                                    FrameCornerIndicator()
+                                    Spacer()
+                                    FrameCornerIndicator()
+                                }
+                                Spacer()
+                                HStack {
+                                    FrameCornerIndicator()
+                                    Spacer()
+                                    FrameCornerIndicator()
+                                }
+                            }
+                            .frame(
+                                width: min(geo.size.width * 0.8, baseImage.resizedImage.size.width * (geo.size.height * 0.8 / baseImage.resizedImage.size.height)),
+                                height: min(geo.size.height * 0.8, baseImage.resizedImage.size.height * (geo.size.width * 0.8 / baseImage.resizedImage.size.width))
+                            )
                         )
                         .overlay(
                             VStack {
                                 HStack {
                                     Text("BASE: \(baseImage.name)")
                                         .font(.caption)
+                                        .fontWeight(.semibold)
                                         .padding(.horizontal, 8)
                                         .padding(.vertical, 4)
                                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 6)
+                                                .stroke(Color.blue, lineWidth: 1)
+                                        )
                                     Spacer()
                                 }
                                 Spacer()
