@@ -224,6 +224,7 @@ final class ImageWorkbench: ObservableObject {
     @Published var showAsTemplate = false
     @Published var baseImageID: ImageDoc.ID? = nil
     @Published var showCoordinates = true
+    @Published var showHistory = true
     @Published var history: [ImageDoc] = []
     @Published var dragOffset: CGSize = .zero
     @Published var isDragging: Bool = false
@@ -793,9 +794,9 @@ final class ImageWorkbench: ObservableObject {
         // Add to beginning of history
         history.insert(doc, at: 0)
         
-        // Keep only last 11 items
-        if history.count > 11 {
-            history = Array(history.prefix(11))
+        // Keep only last 24 items
+        if history.count > 24 {
+            history = Array(history.prefix(24))
         }
         
         print("History now has \(history.count) items")
@@ -901,7 +902,7 @@ final class ImageWorkbench: ObservableObject {
             return true
         }
         
-        history = Array(sortedDocs.prefix(11)) // Keep only last 11
+        history = Array(sortedDocs.prefix(24)) // Keep only last 24
         print("Set history to \(history.count) items")
         
         // Save the cleaned history (removes any items that couldn't be loaded)
@@ -1325,30 +1326,50 @@ struct Sidebar: View {
             }
             
             if !vm.history.isEmpty {
-                Section("Recent") {
-                    ForEach(vm.history) { doc in
-                        HStack {
-                            Thumbnail(image: doc.original)
-                            VStack(alignment: .leading) {
-                                Text(doc.name).lineLimit(1)
-                                Text("\(Int((doc.canvasSize?.width ?? doc.displaySize.width)))×\(Int((doc.canvasSize?.height ?? doc.displaySize.height)))")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
+                Section {
+                    HStack {
+                        Text("Recent")
+                        Spacer()
+                        Button(action: {
+                            vm.showHistory.toggle()
+                        }) {
+                            Image(systemName: vm.showHistory ? "chevron.down" : "chevron.right")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            vm.openFromHistory(doc)
-                        }
-                        .contextMenu {
-                            Button("Open") {
-                                vm.openFromHistory(doc)
+                        .buttonStyle(.plain)
+                    }
+                    
+                    if vm.showHistory {
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                ForEach(vm.history) { doc in
+                                    HStack {
+                                        Thumbnail(image: doc.original)
+                                        VStack(alignment: .leading) {
+                                            Text(doc.name).lineLimit(1)
+                                            Text("\(Int((doc.canvasSize?.width ?? doc.displaySize.width)))×\(Int((doc.canvasSize?.height ?? doc.displaySize.height)))")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                    }
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        vm.openFromHistory(doc)
+                                    }
+                                    .contextMenu {
+                                        Button("Open") {
+                                            vm.openFromHistory(doc)
+                                        }
+                                        Button("Remove from History") {
+                                            vm.history.removeAll { $0.id == doc.id }
+                                        }
+                                    }
+                                }
                             }
-                            Button("Remove from History") {
-                                vm.history.removeAll { $0.id == doc.id }
-                            }
                         }
+                        .frame(maxHeight: 300)
                     }
                 }
             }
