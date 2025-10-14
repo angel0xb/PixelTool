@@ -229,6 +229,8 @@ final class ImageWorkbench: ObservableObject {
     @Published var isDragging: Bool = false
     @Published var isRenaming: Bool = false
     @Published var renameText: String = ""
+    @Published var canvasSize: CGSize = .zero // Store canvas size for placement mode calculations
+    @Published var baseFrameSize: CGSize = .zero // Store actual rendered base frame size
     
     // Animation state
     @Published var isAnimating: Bool = false
@@ -1199,18 +1201,57 @@ final class ImageWorkbench: ObservableObject {
         docs.swapAt(currentIndex, currentIndex - 1)
     }
     
-    func getRelativePosition(for doc: ImageDoc) -> CGPoint {
+    func getRelativePosition(for doc: ImageDoc, baseFrameSize: CGSize? = nil, baseCenter: CGPoint? = nil) -> CGPoint {
         guard let baseImage = getBaseImage() else { return doc.position }
         
-        // Calculate position relative to base image
-        let anchorOffset = CGPoint(
-            x: doc.displaySize.width * doc.anchorPoint.offset.x,
-            y: doc.displaySize.height * doc.anchorPoint.offset.y
+        // Use provided frame size, or stored frame size, or fall back to display size
+        let baseFrameSize = baseFrameSize ?? (self.baseFrameSize != .zero ? self.baseFrameSize : baseImage.displaySize)
+        
+        // Calculate the anchor point position of the overlay image
+        let overlayAnchor = CGPoint(
+            x: doc.position.x + doc.displaySize.width * (doc.anchorPoint.offset.x - 0.5),
+            y: doc.position.y + doc.displaySize.height * (doc.anchorPoint.offset.y - 0.5)
         )
         
+        // Calculate the base image's anchor point position
+        let baseAnchorPoint: CGPoint
+        if let providedCenter = baseCenter {
+            // The provided center is the actual center of the rendered image
+            // Calculate top-left corner from center, then add anchor offset
+            let baseTopLeft = CGPoint(
+                x: providedCenter.x - baseFrameSize.width / 2,
+                y: providedCenter.y - baseFrameSize.height / 2
+            )
+            baseAnchorPoint = CGPoint(
+                x: baseTopLeft.x + baseFrameSize.width * baseImage.anchorPoint.offset.x,
+                y: baseTopLeft.y + baseFrameSize.height * baseImage.anchorPoint.offset.y
+            )
+        } else if layout == .placement && canvasSize != .zero {
+            // In placement mode, use the stored canvas size to calculate the center
+            let calculatedCenter = CGPoint(
+                x: canvasSize.width / 2,
+                y: canvasSize.height / 2
+            )
+            let baseTopLeft = CGPoint(
+                x: calculatedCenter.x - baseFrameSize.width / 2,
+                y: calculatedCenter.y - baseFrameSize.height / 2
+            )
+            baseAnchorPoint = CGPoint(
+                x: baseTopLeft.x + baseFrameSize.width * baseImage.anchorPoint.offset.x,
+                y: baseTopLeft.y + baseFrameSize.height * baseImage.anchorPoint.offset.y
+            )
+        } else {
+            // Fallback to stored position
+            baseAnchorPoint = CGPoint(
+                x: baseImage.position.x + baseFrameSize.width * (baseImage.anchorPoint.offset.x - 0.5),
+                y: baseImage.position.y + baseFrameSize.height * (baseImage.anchorPoint.offset.y - 0.5)
+            )
+        }
+        
+        // Return the difference between the anchor points
         return CGPoint(
-            x: doc.position.x - baseImage.position.x - anchorOffset.x,
-            y: doc.position.y - baseImage.position.y - anchorOffset.y
+            x: overlayAnchor.x - baseAnchorPoint.x,
+            y: overlayAnchor.y - baseAnchorPoint.y
         )
     }
 }
@@ -2175,11 +2216,11 @@ struct Inspector: View {
                     
                     if let baseImage = vm.getBaseImage() {
                         let relativePos = vm.getRelativePosition(for: doc)
-                        LabeledContent("Relative Position") {
-                            Text("(\(Int(relativePos.x)), \(Int(relativePos.y)))")
-                        }
                         LabeledContent("Base Image") {
                             Text(baseImage.name)
+                        }
+                        LabeledContent("Relative Position") {
+                            Text("(\(Int(relativePos.x)), \(Int(relativePos.y)))")
                         }
                     }
                     
@@ -2562,7 +2603,29 @@ struct PlacementCanvas: View {
                 Color(nsColor: .underPageBackgroundColor)
                 
                 if let baseImage = vm.getBaseImage() {
-                    // Base image (background) - positioned at its actual position
+                    // Calculate the actual rendered frame size
+                    let baseFrameSize = CGSize(
+                        width: min(geo.size.width * 0.8, baseImage.resizedImage.size.width * (geo.size.height * 0.8 / baseImage.resizedImage.size.height)),
+                        height: min(geo.size.height * 0.8, baseImage.resizedImage.size.height * (geo.size.width * 0.8 / baseImage.resizedImage.size.width))
+                    )
+                    
+                    // Store canvas size and base frame size in view model for relative position calculations
+                    let _ = DispatchQueue.main.async {
+                        if vm.canvasSize != geo.size {
+                            vm.canvasSize = geo.size
+                        }
+                        if vm.baseFrameSize != baseFrameSize {
+                            vm.baseFrameSize = baseFrameSize
+                        }
+                    }
+                    
+                    // Calculate the actual center position of the base image (it's centered in the view)
+                    let baseActualCenter = CGPoint(
+                        x: geo.size.width / 2,
+                        y: geo.size.height / 2
+                    )
+                    
+                    // Base image (background)
                     Image(nsImage: baseImage.resizedImage)
                         .renderingMode(vm.showAsTemplate ? .template : .original)
                         .resizable()
@@ -2575,10 +2638,7 @@ struct PlacementCanvas: View {
                             // Frame border that matches the actual rendered image dimensions
                             Rectangle()
                                 .stroke(Color.blue, lineWidth: 3)
-                                .frame(
-                                    width: min(geo.size.width * 0.8, baseImage.resizedImage.size.width * (geo.size.height * 0.8 / baseImage.resizedImage.size.height)),
-                                    height: min(geo.size.height * 0.8, baseImage.resizedImage.size.height * (geo.size.width * 0.8 / baseImage.resizedImage.size.width))
-                                )
+                                .frame(width: baseFrameSize.width, height: baseFrameSize.height)
                         )
                         .overlay(
                             // Corner indicators for frame boundaries
@@ -2595,18 +2655,34 @@ struct PlacementCanvas: View {
                                     FrameCornerIndicator()
                                 }
                             }
-                            .frame(
-                                width: min(geo.size.width * 0.8, baseImage.resizedImage.size.width * (geo.size.height * 0.8 / baseImage.resizedImage.size.height)),
-                                height: min(geo.size.height * 0.8, baseImage.resizedImage.size.height * (geo.size.width * 0.8 / baseImage.resizedImage.size.width))
-                            )
+                            .frame(width: baseFrameSize.width, height: baseFrameSize.height)
                         )
                         .overlay(
-                            // Coordinate text overlays
+                            // Anchor point indicator
+                            Circle()
+                                .fill(Color.red)
+                                .frame(width: 12, height: 12)
+                                .overlay(
+                                    Circle()
+                                        .stroke(Color.white, lineWidth: 2)
+                                )
+                                .offset(
+                                    x: (baseImage.anchorPoint.offset.x - 0.5) * baseFrameSize.width,
+                                    y: (baseImage.anchorPoint.offset.y - 0.5) * baseFrameSize.height
+                                )
+                        )
+                        .overlay(
+                            // Coordinate text overlays (relative to anchor point)
                             VStack {
                                 HStack {
-                                    // Top-left corner coordinates
+                                    // Top-left corner coordinates (relative to anchor)
                                     VStack {
-                                        Text("(0, 0)")
+                                        let anchorX = baseImage.anchorPoint.offset.x * baseFrameSize.width
+                                        let anchorY = baseImage.anchorPoint.offset.y * baseFrameSize.height
+                                        let topLeftX = -anchorX
+                                        let topLeftY = -anchorY
+                                        
+                                        Text("(\(Int(topLeftX)), \(Int(topLeftY)))")
                                             .font(.caption2)
                                             .fontWeight(.semibold)
                                             .foregroundColor(.blue)
@@ -2615,9 +2691,14 @@ struct PlacementCanvas: View {
                                         Spacer()
                                     }
                                     Spacer()
-                                    // Top-right corner coordinates
+                                    // Top-right corner coordinates (relative to anchor)
                                     VStack {
-                                        Text("(\(Int(min(geo.size.width * 0.8, baseImage.resizedImage.size.width * (geo.size.height * 0.8 / baseImage.resizedImage.size.height)))), 0)")
+                                        let anchorX = baseImage.anchorPoint.offset.x * baseFrameSize.width
+                                        let anchorY = baseImage.anchorPoint.offset.y * baseFrameSize.height
+                                        let topRightX = baseFrameSize.width - anchorX
+                                        let topRightY = -anchorY
+                                        
+                                        Text("(\(Int(topRightX)), \(Int(topRightY)))")
                                             .font(.caption2)
                                             .fontWeight(.semibold)
                                             .foregroundColor(.blue)
@@ -2628,10 +2709,15 @@ struct PlacementCanvas: View {
                                 }
                                 Spacer()
                                 HStack {
-                                    // Bottom-left corner coordinates
+                                    // Bottom-left corner coordinates (relative to anchor)
                                     VStack {
                                         Spacer()
-                                        Text("(0, \(Int(min(geo.size.height * 0.8, baseImage.resizedImage.size.height * (geo.size.width * 0.8 / baseImage.resizedImage.size.width)))))")
+                                        let anchorX = baseImage.anchorPoint.offset.x * baseFrameSize.width
+                                        let anchorY = baseImage.anchorPoint.offset.y * baseFrameSize.height
+                                        let bottomLeftX = -anchorX
+                                        let bottomLeftY = baseFrameSize.height - anchorY
+                                        
+                                        Text("(\(Int(bottomLeftX)), \(Int(bottomLeftY)))")
                                             .font(.caption2)
                                             .fontWeight(.semibold)
                                             .foregroundColor(.blue)
@@ -2639,10 +2725,15 @@ struct PlacementCanvas: View {
                                             .padding(2)
                                     }
                                     Spacer()
-                                    // Bottom-right corner coordinates
+                                    // Bottom-right corner coordinates (relative to anchor)
                                     VStack {
                                         Spacer()
-                                        Text("(\(Int(min(geo.size.width * 0.8, baseImage.resizedImage.size.width * (geo.size.height * 0.8 / baseImage.resizedImage.size.height)))), \(Int(min(geo.size.height * 0.8, baseImage.resizedImage.size.height * (geo.size.width * 0.8 / baseImage.resizedImage.size.width)))))")
+                                        let anchorX = baseImage.anchorPoint.offset.x * baseFrameSize.width
+                                        let anchorY = baseImage.anchorPoint.offset.y * baseFrameSize.height
+                                        let bottomRightX = baseFrameSize.width - anchorX
+                                        let bottomRightY = baseFrameSize.height - anchorY
+                                        
+                                        Text("(\(Int(bottomRightX)), \(Int(bottomRightY)))")
                                             .font(.caption2)
                                             .fontWeight(.semibold)
                                             .foregroundColor(.blue)
@@ -2651,10 +2742,7 @@ struct PlacementCanvas: View {
                                     }
                                 }
                             }
-                            .frame(
-                                width: min(geo.size.width * 0.8, baseImage.resizedImage.size.width * (geo.size.height * 0.8 / baseImage.resizedImage.size.height)),
-                                height: min(geo.size.height * 0.8, baseImage.resizedImage.size.height * (geo.size.width * 0.8 / baseImage.resizedImage.size.width))
-                            )
+                            .frame(width: baseFrameSize.width, height: baseFrameSize.height)
                         )
                         .overlay(
                             VStack {
@@ -2678,7 +2766,7 @@ struct PlacementCanvas: View {
                     
                     // Overlay images (sprites/assets)
                     ForEach(vm.getOverlayImages()) { doc in
-                        PlacementImage(doc: doc, baseImage: baseImage, maxSize: geo.size)
+                        PlacementImage(doc: doc, baseImage: baseImage, baseFrameSize: baseFrameSize, baseActualCenter: baseActualCenter)
                     }
                 } else {
                     VStack(spacing: 16) {
@@ -2704,7 +2792,8 @@ struct PlacementImage: View {
     @EnvironmentObject var vm: ImageWorkbench
     let doc: ImageDoc
     let baseImage: ImageDoc
-    let maxSize: CGSize
+    let baseFrameSize: CGSize
+    let baseActualCenter: CGPoint
     
     @State private var isDragging: Bool = false
     @State private var dragStartPosition: CGPoint = .zero
@@ -2712,7 +2801,7 @@ struct PlacementImage: View {
     var body: some View {
         let isFocused = vm.isFocused(doc)
         let currentPosition = doc.position
-        let relativePosition = vm.getRelativePosition(for: doc)
+        let relativePosition = vm.getRelativePosition(for: doc, baseFrameSize: baseFrameSize, baseCenter: baseActualCenter)
         
         return Image(nsImage: doc.resizedImage)
             .renderingMode(vm.showAsTemplate ? .template : .original)
