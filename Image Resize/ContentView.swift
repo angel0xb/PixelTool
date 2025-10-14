@@ -264,6 +264,44 @@ final class ImageWorkbench: ObservableObject {
         }
     }
     
+    func openFolder() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.begin { [weak self] resp in
+            guard resp == .OK, let folderURL = panel.url else { return }
+            Task { @MainActor in
+                await self?.loadImagesFromFolder(folderURL)
+            }
+        }
+    }
+    
+    func loadImagesFromFolder(_ folderURL: URL) async {
+        let fileManager = FileManager.default
+        let allowedExtensions = ["png", "jpg", "jpeg", "tiff", "tif", "bmp", "gif", "heic", "webp"]
+        
+        var imageURLs: [URL] = []
+        
+        // Recursively find all image files in the folder
+        if let enumerator = fileManager.enumerator(at: folderURL, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+            for case let fileURL as URL in enumerator {
+                if let resourceValues = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]),
+                   resourceValues.isRegularFile == true {
+                    let fileExtension = fileURL.pathExtension.lowercased()
+                    if allowedExtensions.contains(fileExtension) {
+                        imageURLs.append(fileURL)
+                    }
+                }
+            }
+        }
+        
+        // Load all found images
+        if !imageURLs.isEmpty {
+            await load(urls: imageURLs)
+        }
+    }
+    
     func load(urls: [URL]) async {
         var newDocs: [ImageDoc] = []
         for url in urls {
@@ -1406,6 +1444,12 @@ struct ToolbarBar: View {
                     vm.openImages()
                 } label: {
                     Label("Open", systemImage: "folder.badge.plus")
+                }
+                
+                Button {
+                    vm.openFolder()
+                } label: {
+                    Label("Open Folder", systemImage: "folder.fill")
                 }
                 Picker("Layout", selection: $vm.layout) {
                     ForEach(ImageWorkbench.LayoutMode.allCases) { mode in
