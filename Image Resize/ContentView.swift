@@ -470,13 +470,11 @@ final class ImageWorkbench: ObservableObject {
     func flipX(for id: ImageDoc.ID) {
         guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
         docs[idx].flipX.toggle()
-        print("Flipped X for \(docs[idx].name): \(docs[idx].flipX)")
     }
     
     func flipY(for id: ImageDoc.ID) {
         guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
         docs[idx].flipY.toggle()
-        print("Flipped Y for \(docs[idx].name): \(docs[idx].flipY)")
     }
     
     // MARK: Position updates
@@ -1581,7 +1579,7 @@ struct FocusableImage: View {
         let size = CGSize(width: min(doc.displaySize.width * liveScale, maxSize.width),
                           height: min(doc.displaySize.height * liveScale, maxSize.height))
         
-        return Image(nsImage: doc.original)
+        return Image(nsImage: doc.resizedImage)
             .renderingMode(vm.showAsTemplate ? .template : .original)
             .resizable()
             .interpolation(.high)
@@ -1640,8 +1638,8 @@ struct DraggableResizableImage: View {
         // Use canvas size only when in canvas resize mode, otherwise use display size
         let frameSize = vm.canvasResizeMode ? (doc.canvasSize ?? doc.displaySize) : doc.displaySize
         
-        // Get the appropriate image (template or original)
-        let displayImage = doc.original
+        // Get the appropriate image (template or original with transformations)
+        let displayImage = doc.resizedImage
         
         // Debug logging
         if vm.canvasResizeMode {
@@ -2746,7 +2744,6 @@ extension NSImage {
     
     func flipped(horizontal: Bool, vertical: Bool) -> NSImage? {
         guard horizontal || vertical else { return self }
-        print("Flipping image: horizontal=\(horizontal), vertical=\(vertical)")
         
         let img = NSImage(size: size)
         img.lockFocus()
