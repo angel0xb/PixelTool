@@ -5,13 +5,12 @@
 //  Created by Angel Rodriguez on 10/12/25.
 //
 
-
 import AppKit
 import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - Model
+// MARK: - Models
 
 enum AnchorPoint: String, CaseIterable, Identifiable {
     case topLeft = "Top Left"
@@ -113,15 +112,14 @@ struct ImageDoc: Identifiable, Hashable {
     }
 }
 
-// Persistent model for history items
 struct PersistentImageDoc: Codable {
     let url: URL?
     let name: String
     let displaySize: CGSize
     let originalSize: CGSize
     let lastAccessed: Date
-    let imageData: Data? // Store the actual image data
-    let borderColorData: Data? // Store the border color as data
+    let imageData: Data?
+    let borderColorData: Data?
     let isVisible: Bool
     let frameDuration: Double
     let animationOrder: Int
@@ -136,14 +134,12 @@ struct PersistentImageDoc: Codable {
         self.frameDuration = doc.frameDuration
         self.animationOrder = doc.animationOrder
         
-        // Try to get image data from the original image
         if let tiffData = doc.original.tiffRepresentation {
             self.imageData = tiffData
         } else {
             self.imageData = nil
         }
         
-        // Store border color as data (we'll use a simple approach with RGB values)
         let color = doc.borderColor
         let nsColor = NSColor(color)
         let rgb = nsColor.usingColorSpace(.sRGB) ?? nsColor
@@ -158,23 +154,19 @@ struct PersistentImageDoc: Codable {
     func toImageDoc() -> ImageDoc? {
         var image: NSImage?
         
-        // First try to load from stored image data
         if let data = imageData {
             image = NSImage(data: data)
         }
         
-        // If that fails and we have a URL, try loading from URL
         if image == nil, let url = url {
             image = NSImage(contentsOf: url)
         }
         
-        // If we still can't load the image, return nil
         guard let img = image else { 
             print("Failed to load image from both data and URL: \(name)")
             return nil 
         }
         
-        // Restore border color from data
         let borderColor: Color
         if let colorData = borderColorData, colorData.count >= 3 {
             let red = Double(colorData[0]) / 255.0
@@ -182,7 +174,6 @@ struct PersistentImageDoc: Codable {
             let blue = Double(colorData[2]) / 255.0
             borderColor = Color(red: red, green: green, blue: blue)
         } else {
-            // Default to red if no color data
             borderColor = .red
         }
         
@@ -818,6 +809,39 @@ final class ImageWorkbench: ObservableObject {
         docs[idx] = doc
     }
     
+    // MARK: - Batch Resize Operations
+    
+    /// Batch resize all images by a multiplier while maintaining aspect ratio
+    func batchResize(by multiplier: CGFloat) {
+        guard multiplier > 0 else { return }
+        
+        for i in docs.indices {
+            let doc = docs[i]
+            let newDisplaySize = CGSize(
+                width: doc.displaySize.width * multiplier,
+                height: doc.displaySize.height * multiplier
+            )
+            
+            if canvasResizeMode {
+                // In canvas mode, we're scaling the canvas size
+                // Keep the image content size the same, just change the canvas
+                docs[i].displaySize = newDisplaySize
+                // imageContentSize stays the same in canvas mode
+            } else {
+                // In regular mode, we're scaling both the display size and image content
+                docs[i].displaySize = newDisplaySize
+                docs[i].imageContentSize = newDisplaySize
+            }
+        }
+    }
+    
+    /// Convenience methods for common batch resize operations
+    func batchResize2x() { batchResize(by: 2.0) }
+    func batchResize3x() { batchResize(by: 3.0) }
+    func batchResize4x() { batchResize(by: 4.0) }
+    func batchResizeHalf() { batchResize(by: 0.5) }
+    func batchResizeThird() { batchResize(by: 1.0/3.0) }
+    func batchResizeQuarter() { batchResize(by: 0.25) }
     
     // MARK: History management
     func addToHistory(_ doc: ImageDoc) {
@@ -1587,6 +1611,45 @@ struct ToolbarBar: View {
                     Toggle("Show Coordinates", isOn: $vm.showCoordinates)
                         .toggleStyle(.switch)
                     Spacer()
+                }
+            }
+            
+            // Batch resize controls (shown when there are images)
+            if !vm.docs.isEmpty {
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Batch Resize")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    
+                    HStack(spacing: 8) {
+                        // Scale up buttons
+                        Group {
+                            Button("2×") { vm.batchResize2x() }
+                            Button("3×") { vm.batchResize3x() }
+                            Button("4×") { vm.batchResize4x() }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        
+                        Divider()
+                            .frame(height: 20)
+                        
+                        // Scale down buttons
+                        Group {
+                            Button("½") { vm.batchResizeHalf() }
+                            Button("⅓") { vm.batchResizeThird() }
+                            Button("¼") { vm.batchResizeQuarter() }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        
+                        Spacer()
+                        
+                        Text("Aspect locked")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             }
         }
