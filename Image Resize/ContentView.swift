@@ -46,15 +46,15 @@ struct ImageDoc: Identifiable, Hashable {
     var url: URL?
     var name: String
     var original: NSImage
-    /// Logical size used for preview/resizing the focused image
+    /// Original image content size (actual pixel size, not scaled)
+    var imageContentSize: CGSize
+    /// Logical size used for preview/resizing - this is the final exported size
     var displaySize: CGSize
     /// Per-image overlay opacity (only used in overlay mode)
     var overlayOpacity: Double = 1.0
     /// Position for drag-to-move functionality
     var position: CGPoint = .zero
-    /// Canvas size for canvas resize mode (the visible frame size around the image)
-    var canvasSize: CGSize?
-    /// Image offset within the canvas (for centering/positioning)
+    /// Image offset within the canvas (for positioning in canvas mode)
     var imageOffset: CGPoint = .zero
     /// Original size when first loaded (for modification tracking)
     var originalSize: CGSize
@@ -106,13 +106,10 @@ struct ImageDoc: Identifiable, Hashable {
         // Check if opacity has been changed from default
         let opacityChanged = abs(overlayOpacity - 1.0) > 0.01
         
-        // Check if canvas resize has been used
-        let canvasChanged = canvasSize != nil
-        
         // Check if image has been flipped
         let flipChanged = flipX || flipY
         
-        return sizeChanged || positionChanged || opacityChanged || canvasChanged || flipChanged
+        return sizeChanged || positionChanged || opacityChanged || flipChanged
     }
 }
 
@@ -193,6 +190,7 @@ struct PersistentImageDoc: Codable {
             url: url,
             name: name,
             original: img,
+            imageContentSize: displaySize,
             displaySize: displaySize,
             position: CGPoint(x: 400, y: 300),
             originalSize: originalSize,
@@ -214,9 +212,19 @@ final class ImageWorkbench: ObservableObject {
     @Published var keepAspect = true
     @Published var canvasResizeMode = false {
         didSet {
-            // When switching back to image resize mode, "bake" the canvas size into the display size
-            if !canvasResizeMode {
-                bakeCanvasSizesIntoDisplaySizes()
+            // Defer updates to avoid publishing changes during view updates
+            Task { @MainActor in
+                if canvasResizeMode {
+                    // When switching to canvas mode, ensure imageContentSize is set to current displaySize
+                    for idx in docs.indices {
+                        docs[idx].imageContentSize = docs[idx].displaySize
+                    }
+                } else {
+                    // When switching from canvas to regular mode, update displaySize and imageContentSize to match
+                    for idx in docs.indices {
+                        docs[idx].imageContentSize = docs[idx].displaySize
+                    }
+                }
             }
         }
     }
@@ -311,7 +319,7 @@ final class ImageWorkbench: ObservableObject {
                 let centerPosition = CGPoint(x: 400, y: 300) // Default center position
                 let borderColor = generateBorderColor(for: newDocs.count)
                 let animationOrder = docs.count + newDocs.count // Set animation order based on total count
-                let doc = ImageDoc(url: url, name: url.lastPathComponent, original: img, displaySize: start, position: centerPosition, originalSize: s, borderColor: borderColor, frameDuration: 0.5, animationOrder: animationOrder)
+                let doc = ImageDoc(url: url, name: url.lastPathComponent, original: img, imageContentSize: start, displaySize: start, position: centerPosition, originalSize: s, borderColor: borderColor, frameDuration: 0.5, animationOrder: animationOrder)
                 newDocs.append(doc)
                 addToHistory(doc)
             }
@@ -334,7 +342,7 @@ final class ImageWorkbench: ObservableObject {
                         let centerPosition = CGPoint(x: 400, y: 300) // Default center position
                         let borderColor = self.generateBorderColor(for: self.docs.count)
                         let animationOrder = self.docs.count
-                        let doc = ImageDoc(url: nil, name: "Dropped Image", original: img, displaySize: start, position: centerPosition, originalSize: s, borderColor: borderColor, frameDuration: 0.5, animationOrder: animationOrder)
+                        let doc = ImageDoc(url: nil, name: "Dropped Image", original: img, imageContentSize: start, displaySize: start, position: centerPosition, originalSize: s, borderColor: borderColor, frameDuration: 0.5, animationOrder: animationOrder)
                         self.docs.append(doc)
                         self.addToHistory(doc)
                         if self.focusedID == nil { self.focusedID = doc.id }
@@ -363,9 +371,9 @@ final class ImageWorkbench: ObservableObject {
         panel.nameFieldStringValue = base + format.suggestedExtension
         panel.begin { resp in
             guard resp == .OK, let dest = panel.url else { return }
-            let target = focused.displaySize
-            guard let resized = focused.original.resized(to: target, keepAspect: self.keepAspect),
-                  let data = resized.data(for: format) else { return }
+            // Get the final image based on the current mode
+            guard let finalImage = self.getFinalImage(for: focused),
+                  let data = finalImage.data(for: format) else { return }
             try? data.write(to: dest)
         }
     }
@@ -400,9 +408,9 @@ final class ImageWorkbench: ObservableObject {
                     let fileName = baseName + format.suggestedExtension
                     let fileURL = folderURL.appendingPathComponent(fileName)
                     
-                    let target = doc.displaySize
-                    guard let resized = doc.original.resized(to: target, keepAspect: self.keepAspect),
-                          let data = resized.data(for: format) else {
+                    // Get the final image based on the current mode
+                    guard let finalImage = self.getFinalImage(for: doc),
+                          let data = finalImage.data(for: format) else {
                         failedCount += 1
                         continue
                     }
@@ -432,6 +440,57 @@ final class ImageWorkbench: ObservableObject {
         var id: String { rawValue }
         var uti: UTType { self == .png ? .png : .jpeg }
         var suggestedExtension: String { self == .png ? ".png" : ".jpg" }
+    }
+    
+    // MARK: Final Image Generation
+    private func getFinalImage(for doc: ImageDoc) -> NSImage? {
+        if canvasResizeMode {
+            // Canvas mode: Keep image at imageContentSize, add/remove transparent padding to reach displaySize
+            return createCanvasImage(for: doc)
+        } else {
+            // Regular mode: Scale image to fill displaySize
+            return doc.resizedImage
+        }
+    }
+    
+    private func createCanvasImage(for doc: ImageDoc) -> NSImage? {
+        let canvasSize = doc.displaySize
+        let contentSize = doc.imageContentSize
+        let imageOffset = doc.imageOffset
+        
+        // First, resize the original image to contentSize
+        var imageToRender = doc.original.resized(to: contentSize, keepAspect: false) ?? doc.original
+        
+        // Apply flips if needed
+        if doc.flipX || doc.flipY {
+            imageToRender = imageToRender.flipped(horizontal: doc.flipX, vertical: doc.flipY) ?? imageToRender
+        }
+        
+        // Create a new image with transparent background at canvas size
+        let canvas = NSImage(size: canvasSize)
+        
+        canvas.lockFocus()
+        defer { canvas.unlockFocus() }
+        
+        // Fill with transparent background
+        NSColor.clear.set()
+        NSRect(origin: .zero, size: canvasSize).fill()
+        
+        // Calculate where to draw the image content
+        // macOS uses bottom-left origin, but SwiftUI uses top-left
+        let flippedY = canvasSize.height - contentSize.height - imageOffset.y
+        
+        let destRect = NSRect(
+            x: imageOffset.x,
+            y: flippedY,
+            width: contentSize.width,
+            height: contentSize.height
+        )
+        
+        NSGraphicsContext.current?.imageInterpolation = .high
+        imageToRender.draw(in: destRect, from: NSRect(origin: .zero, size: imageToRender.size), operation: .sourceOver, fraction: 1.0)
+        
+        return canvas
     }
     
     // MARK: Focus helpers
@@ -536,33 +595,69 @@ final class ImageWorkbench: ObservableObject {
     func cornerResize(for id: ImageDoc.ID, corner: ResizeCorner, delta: CGSize) {
         guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
         var doc = docs[idx]
-        var newSize = doc.displaySize
         
-        switch corner {
-        case .topLeft:
-            newSize.width = max(50, newSize.width - delta.width)
-            newSize.height = max(50, newSize.height - delta.height)
-        case .topRight:
-            newSize.width = max(50, newSize.width + delta.width)
-            newSize.height = max(50, newSize.height - delta.height)
-        case .bottomLeft:
-            newSize.width = max(50, newSize.width - delta.width)
-            newSize.height = max(50, newSize.height + delta.height)
-        case .bottomRight:
-            newSize.width = max(50, newSize.width + delta.width)
-            newSize.height = max(50, newSize.height + delta.height)
-        }
-        
-        if keepAspect {
-            let ar = doc.aspectRatio
-            if newSize.width / max(newSize.height, 1) > ar {
-                newSize.width = newSize.height * ar
-            } else {
-                newSize.height = newSize.width / max(ar, 0.0001)
+        if canvasResizeMode {
+            // In canvas mode, corner resize adjusts the image content size
+            var newContentSize = doc.imageContentSize
+            
+            switch corner {
+            case .topLeft:
+                newContentSize.width = max(50, newContentSize.width - delta.width)
+                newContentSize.height = max(50, newContentSize.height - delta.height)
+            case .topRight:
+                newContentSize.width = max(50, newContentSize.width + delta.width)
+                newContentSize.height = max(50, newContentSize.height - delta.height)
+            case .bottomLeft:
+                newContentSize.width = max(50, newContentSize.width - delta.width)
+                newContentSize.height = max(50, newContentSize.height + delta.height)
+            case .bottomRight:
+                newContentSize.width = max(50, newContentSize.width + delta.width)
+                newContentSize.height = max(50, newContentSize.height + delta.height)
             }
+            
+            if keepAspect {
+                let ar = doc.aspectRatio
+                if newContentSize.width / max(newContentSize.height, 1) > ar {
+                    newContentSize.width = newContentSize.height * ar
+                } else {
+                    newContentSize.height = newContentSize.width / max(ar, 0.0001)
+                }
+            }
+            
+            doc.imageContentSize = newContentSize
+        } else {
+            // In regular mode, corner resize adjusts the display size (scales the image)
+            var newSize = doc.displaySize
+            
+            switch corner {
+            case .topLeft:
+                newSize.width = max(50, newSize.width - delta.width)
+                newSize.height = max(50, newSize.height - delta.height)
+            case .topRight:
+                newSize.width = max(50, newSize.width + delta.width)
+                newSize.height = max(50, newSize.height - delta.height)
+            case .bottomLeft:
+                newSize.width = max(50, newSize.width - delta.width)
+                newSize.height = max(50, newSize.height + delta.height)
+            case .bottomRight:
+                newSize.width = max(50, newSize.width + delta.width)
+                newSize.height = max(50, newSize.height + delta.height)
+            }
+            
+            if keepAspect {
+                let ar = doc.aspectRatio
+                if newSize.width / max(newSize.height, 1) > ar {
+                    newSize.width = newSize.height * ar
+                } else {
+                    newSize.height = newSize.width / max(ar, 0.0001)
+                }
+            }
+            
+            doc.displaySize = newSize
+            // Update imageContentSize to match in regular mode
+            doc.imageContentSize = newSize
         }
         
-        doc.displaySize = newSize
         docs[idx] = doc
     }
     
@@ -574,14 +669,7 @@ final class ImageWorkbench: ObservableObject {
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         print("[\(timestamp)] 🔧 EDGE RESIZE CALLED - Edge: \(edge), Delta: \(delta)")
         
-        // Initialize canvas size if not set (first time in canvas resize mode)
-        if doc.canvasSize == nil {
-            doc.canvasSize = doc.displaySize
-            // Center the image in the canvas initially
-            doc.imageOffset = .zero
-        }
-        
-        var canvasSize = doc.canvasSize!
+        var displaySize = doc.displaySize
         var imageOffset = doc.imageOffset
         var position = doc.position
         
@@ -592,34 +680,34 @@ final class ImageWorkbench: ObservableObject {
         switch edge {
         case .top:
             // Drag up (negative delta) = expand canvas upward
-            let oldHeight = canvasSize.height
-            canvasSize.height = max(50, canvasSize.height - delta.height)
-            let actualDelta = canvasSize.height - oldHeight
+            let oldHeight = displaySize.height
+            displaySize.height = max(50, displaySize.height - delta.height)
+            let actualDelta = displaySize.height - oldHeight
             // Move canvas up to counter the growth (negative delta means growing up)
             position.y -= actualDelta / 2
             // Also adjust image offset to compensate for canvas growth from top
             imageOffset.y += actualDelta
         case .bottom:
             // Drag down (positive delta) = expand canvas downward
-            let oldHeight = canvasSize.height
-            canvasSize.height = max(50, canvasSize.height + delta.height)
-            let actualDelta = canvasSize.height - oldHeight
+            let oldHeight = displaySize.height
+            displaySize.height = max(50, displaySize.height + delta.height)
+            let actualDelta = displaySize.height - oldHeight
             // Canvas grows from center, so move canvas position by half
             position.y += actualDelta / 2
         case .left:
             // Drag left (negative delta) = expand canvas leftward
-            let oldWidth = canvasSize.width
-            canvasSize.width = max(50, canvasSize.width - delta.width)
-            let actualDelta = canvasSize.width - oldWidth
+            let oldWidth = displaySize.width
+            displaySize.width = max(50, displaySize.width - delta.width)
+            let actualDelta = displaySize.width - oldWidth
             // Move canvas left to counter the growth (negative delta means growing left)
             position.x -= actualDelta / 2
             // Also adjust image offset to compensate for canvas growth from left
             imageOffset.x += actualDelta
         case .right:
             // Drag right (positive delta) = expand canvas rightward
-            let oldWidth = canvasSize.width
-            canvasSize.width = max(50, canvasSize.width + delta.width)
-            let actualDelta = canvasSize.width - oldWidth
+            let oldWidth = displaySize.width
+            displaySize.width = max(50, displaySize.width + delta.width)
+            let actualDelta = displaySize.width - oldWidth
             // Canvas grows from center, so move canvas position by half
             position.x += actualDelta / 2
         }
@@ -628,16 +716,16 @@ final class ImageWorkbench: ObservableObject {
         // Canvas resize should allow free-form resizing like Procreate
         if keepAspect && !canvasResizeMode {
             let ar = doc.aspectRatio
-            if canvasSize.width / max(canvasSize.height, 1) > ar {
-                canvasSize.width = canvasSize.height * ar
+            if displaySize.width / max(displaySize.height, 1) > ar {
+                displaySize.width = displaySize.height * ar
             } else {
-                canvasSize.height = canvasSize.width / max(ar, 0.0001)
+                displaySize.height = displaySize.width / max(ar, 0.0001)
             }
         }
         
-        print("[\(timestamp)] 🔧 CANVAS SIZE CHANGE - Old: \(doc.canvasSize?.width ?? 0)x\(doc.canvasSize?.height ?? 0) -> New: \(canvasSize.width)x\(canvasSize.height)")
+        print("[\(timestamp)] 🔧 DISPLAY SIZE CHANGE - Old: \(doc.displaySize.width)x\(doc.displaySize.height) -> New: \(displaySize.width)x\(displaySize.height)")
         
-        doc.canvasSize = canvasSize
+        doc.displaySize = displaySize
         doc.imageOffset = imageOffset
         doc.position = position
         docs[idx] = doc
@@ -654,43 +742,37 @@ final class ImageWorkbench: ObservableObject {
         guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
         var doc = docs[idx]
         
-        // Initialize canvas size if not set
-        if doc.canvasSize == nil {
-            doc.canvasSize = doc.displaySize
-            doc.imageOffset = .zero
-        }
-        
-        var canvasSize = doc.canvasSize!
+        var displaySize = doc.displaySize
         var imageOffset = doc.imageOffset
         var position = doc.position
         
         // Increment by 1 pixel for the specified edge
         switch edge {
         case .top:
-            let oldHeight = canvasSize.height
-            canvasSize.height = max(50, canvasSize.height + 1)
-            let actualDelta = canvasSize.height - oldHeight
+            let oldHeight = displaySize.height
+            displaySize.height = max(50, displaySize.height + 1)
+            let actualDelta = displaySize.height - oldHeight
             position.y -= actualDelta / 2
             imageOffset.y += actualDelta
         case .bottom:
-            let oldHeight = canvasSize.height
-            canvasSize.height = max(50, canvasSize.height + 1)
-            let actualDelta = canvasSize.height - oldHeight
+            let oldHeight = displaySize.height
+            displaySize.height = max(50, displaySize.height + 1)
+            let actualDelta = displaySize.height - oldHeight
             position.y += actualDelta / 2
         case .left:
-            let oldWidth = canvasSize.width
-            canvasSize.width = max(50, canvasSize.width + 1)
-            let actualDelta = canvasSize.width - oldWidth
+            let oldWidth = displaySize.width
+            displaySize.width = max(50, displaySize.width + 1)
+            let actualDelta = displaySize.width - oldWidth
             position.x -= actualDelta / 2
             imageOffset.x += actualDelta
         case .right:
-            let oldWidth = canvasSize.width
-            canvasSize.width = max(50, canvasSize.width + 1)
-            let actualDelta = canvasSize.width - oldWidth
+            let oldWidth = displaySize.width
+            displaySize.width = max(50, displaySize.width + 1)
+            let actualDelta = displaySize.width - oldWidth
             position.x += actualDelta / 2
         }
         
-        doc.canvasSize = canvasSize
+        doc.displaySize = displaySize
         doc.imageOffset = imageOffset
         doc.position = position
         docs[idx] = doc
@@ -700,116 +782,42 @@ final class ImageWorkbench: ObservableObject {
         guard let idx = docs.firstIndex(where: { $0.id == id }) else { return }
         var doc = docs[idx]
         
-        // Initialize canvas size if not set
-        if doc.canvasSize == nil {
-            doc.canvasSize = doc.displaySize
-            doc.imageOffset = .zero
-        }
-        
-        var canvasSize = doc.canvasSize!
+        var displaySize = doc.displaySize
         var imageOffset = doc.imageOffset
         var position = doc.position
         
         // Decrement by 1 pixel for the specified edge
         switch edge {
         case .top:
-            let oldHeight = canvasSize.height
-            canvasSize.height = max(50, canvasSize.height - 1)
-            let actualDelta = canvasSize.height - oldHeight
+            let oldHeight = displaySize.height
+            displaySize.height = max(50, displaySize.height - 1)
+            let actualDelta = displaySize.height - oldHeight
             position.y -= actualDelta / 2
             imageOffset.y += actualDelta
         case .bottom:
-            let oldHeight = canvasSize.height
-            canvasSize.height = max(50, canvasSize.height - 1)
-            let actualDelta = canvasSize.height - oldHeight
+            let oldHeight = displaySize.height
+            displaySize.height = max(50, displaySize.height - 1)
+            let actualDelta = displaySize.height - oldHeight
             position.y += actualDelta / 2
         case .left:
-            let oldWidth = canvasSize.width
-            canvasSize.width = max(50, canvasSize.width - 1)
-            let actualDelta = canvasSize.width - oldWidth
+            let oldWidth = displaySize.width
+            displaySize.width = max(50, displaySize.width - 1)
+            let actualDelta = displaySize.width - oldWidth
             position.x -= actualDelta / 2
             imageOffset.x += actualDelta
         case .right:
-            let oldWidth = canvasSize.width
-            canvasSize.width = max(50, canvasSize.width - 1)
-            let actualDelta = canvasSize.width - oldWidth
+            let oldWidth = displaySize.width
+            displaySize.width = max(50, displaySize.width - 1)
+            let actualDelta = displaySize.width - oldWidth
             position.x += actualDelta / 2
         }
         
-        doc.canvasSize = canvasSize
+        doc.displaySize = displaySize
         doc.imageOffset = imageOffset
         doc.position = position
         docs[idx] = doc
     }
     
-    func bakeCanvasSizesIntoDisplaySizes() {
-        // When switching from canvas resize to image resize mode,
-        // "bake" the canvas size into the display size by creating a new composite image
-        for idx in docs.indices {
-            if let canvasSize = docs[idx].canvasSize {
-                let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-                print("[\(timestamp)] 🔄 BAKING CANVAS - Image: \(docs[idx].name)")
-                print("[\(timestamp)]   Old display size: \(docs[idx].displaySize.width)x\(docs[idx].displaySize.height)")
-                print("[\(timestamp)]   Canvas size: \(canvasSize.width)x\(canvasSize.height)")
-                print("[\(timestamp)]   Image offset: \(docs[idx].imageOffset.x)x\(docs[idx].imageOffset.y)")
-                
-                // Create a new image with the canvas size that includes the original image with padding
-                if let compositeImage = createCompositeImage(
-                    original: docs[idx].original,
-                    displaySize: docs[idx].displaySize,
-                    canvasSize: canvasSize,
-                    imageOffset: docs[idx].imageOffset
-                ) {
-                    print("[\(timestamp)]   Created composite image: \(compositeImage.size.width)x\(compositeImage.size.height)")
-                    
-                    // Replace the original image with the composite
-                    docs[idx].original = compositeImage
-                    // Set the display size to match the canvas size
-                    docs[idx].displaySize = canvasSize
-                    
-                    print("[\(timestamp)]   New display size: \(docs[idx].displaySize.width)x\(docs[idx].displaySize.height)")
-                } else {
-                    print("[\(timestamp)]   Failed to create composite image, falling back to size change only")
-                    docs[idx].displaySize = canvasSize
-                }
-                
-                // Clear the canvas-specific properties since we're now in image resize mode
-                docs[idx].canvasSize = nil
-                docs[idx].imageOffset = .zero
-            }
-        }
-    }
-    
-    private func createCompositeImage(original: NSImage, displaySize: CGSize, canvasSize: CGSize, imageOffset: CGPoint) -> NSImage? {
-        // Create a new image with the canvas size
-        let composite = NSImage(size: canvasSize)
-        
-        composite.lockFocus()
-        defer { composite.unlockFocus() }
-        
-        // Fill with transparent background
-        NSColor.clear.set()
-        NSRect(origin: .zero, size: canvasSize).fill()
-        
-        // macOS uses bottom-left origin, but SwiftUI uses top-left
-        // We need to flip the Y coordinate to match the visual representation
-        // When we add padding to the top in SwiftUI (negative imageOffset.y),
-        // it should appear at the top in the final image
-        let flippedY = canvasSize.height - displaySize.height - imageOffset.y
-        
-        // Draw the original image at the offset position with the display size
-        let destRect = NSRect(
-            x: imageOffset.x,
-            y: flippedY,
-            width: displaySize.width,
-            height: displaySize.height
-        )
-        
-        NSGraphicsContext.current?.imageInterpolation = .high
-        original.draw(in: destRect, from: .zero, operation: .sourceOver, fraction: 1.0)
-        
-        return composite
-    }
     
     // MARK: History management
     func addToHistory(_ doc: ImageDoc) {
@@ -860,6 +868,7 @@ final class ImageWorkbench: ObservableObject {
                 url: doc.url,
                 name: doc.name,
                 original: doc.original,
+                imageContentSize: doc.imageContentSize,
                 displaySize: doc.displaySize,
                 position: CGPoint(x: 400, y: 300),
                 originalSize: doc.originalSize,
@@ -1336,7 +1345,7 @@ struct Sidebar: View {
                         Thumbnail(image: doc.original)
                         VStack(alignment: .leading) {
                             Text(doc.name).lineLimit(1)
-                            Text("\(Int((doc.canvasSize?.width ?? doc.displaySize.width)))×\(Int((doc.canvasSize?.height ?? doc.displaySize.height)))")
+                            Text("\(Int(doc.displaySize.width))×\(Int(doc.displaySize.height))")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -1386,7 +1395,7 @@ struct Sidebar: View {
                                         Thumbnail(image: doc.original)
                                         VStack(alignment: .leading) {
                                             Text(doc.name).lineLimit(1)
-                                            Text("\(Int((doc.canvasSize?.width ?? doc.displaySize.width)))×\(Int((doc.canvasSize?.height ?? doc.displaySize.height)))")
+                                            Text("\(Int(doc.displaySize.width))×\(Int(doc.displaySize.height))")
                                                 .font(.caption2)
                                                 .foregroundStyle(.secondary)
                                         }
@@ -1609,8 +1618,8 @@ struct CanvasArea: View {
                                 .opacity(doc.overlayOpacity)
                         }
                         
-                        // Position display for focused image
-                        if let focusedDoc = vm.docs.first(where: { vm.isFocused($0) && $0.isVisible }) {
+                        // Position display for focused image - only show when coordinates are enabled
+                        if vm.showCoordinates, let focusedDoc = vm.docs.first(where: { vm.isFocused($0) && $0.isVisible }) {
                             VStack {
                                 Spacer()
                                 HStack {
@@ -1655,7 +1664,7 @@ struct FlowGrid: View {
                     HStack {
                         Text(doc.name).font(.caption).lineLimit(1)
                         Spacer()
-                        Text("\(Int((doc.canvasSize?.width ?? doc.displaySize.width)))×\(Int((doc.canvasSize?.height ?? doc.displaySize.height)))")
+                        Text("\(Int(doc.displaySize.width))×\(Int(doc.displaySize.height))")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
@@ -1741,15 +1750,28 @@ struct DraggableResizableImage: View {
         let isFocused = vm.isFocused(doc)
         let currentPosition = doc.position
         
-        // Use canvas size only when in canvas resize mode, otherwise use display size
-        let frameSize = vm.canvasResizeMode ? (doc.canvasSize ?? doc.displaySize) : doc.displaySize
+        // The frame size is always displaySize (the final output size)
+        let frameSize = doc.displaySize
         
-        // Get the appropriate image (template or original with transformations)
-        let displayImage = doc.resizedImage
+        // In canvas mode, render image at imageContentSize; in regular mode, use resizedImage
+        let (displayImage, imageSize): (NSImage, CGSize)
+        if vm.canvasResizeMode {
+            // In canvas mode, use original image with flips applied (if any)
+            var imageToUse = doc.original
+            if doc.flipX || doc.flipY {
+                imageToUse = doc.original.flipped(horizontal: doc.flipX, vertical: doc.flipY) ?? doc.original
+            }
+            displayImage = imageToUse
+            imageSize = doc.imageContentSize
+        } else {
+            // In regular mode, use resizedImage (which already has flips applied)
+            displayImage = doc.resizedImage
+            imageSize = doc.displaySize
+        }
         
         // Debug logging
         if vm.canvasResizeMode {
-            print("🔍 CANVAS SIZE DEBUG - Canvas: \(doc.canvasSize?.width ?? 0)x\(doc.canvasSize?.height ?? 0), Display: \(doc.displaySize.width)x\(doc.displaySize.height), Frame: \(frameSize.width)x\(frameSize.height)")
+            print("🔍 CANVAS MODE DEBUG - Display: \(doc.displaySize.width)x\(doc.displaySize.height), Image Content: \(doc.imageContentSize.width)x\(doc.imageContentSize.height), Offset: \(doc.imageOffset)")
         }
         
         return ZStack(alignment: .topLeading) {
@@ -1765,7 +1787,7 @@ struct DraggableResizableImage: View {
                 .interpolation(.high)
                 .antialiased(true)
                 .aspectRatio(contentMode: .fit)
-                .frame(width: doc.displaySize.width, height: doc.displaySize.height)
+                .frame(width: imageSize.width, height: imageSize.height)
                 .offset(x: doc.imageOffset.x, y: doc.imageOffset.y)
                 .foregroundColor(vm.showAsTemplate ? doc.borderColor : nil)
         }
@@ -1904,8 +1926,8 @@ struct DraggableResizableImage: View {
     }
     
     private func handlePosition(for corner: ImageWorkbench.ResizeCorner) -> CGPoint {
-        // Use canvas size if set, otherwise use display size
-        let frameSize = doc.canvasSize ?? doc.displaySize
+        // Use displaySize for frame size
+        let frameSize = doc.displaySize
         
         // Position handles at the actual corners of the frame
         // Overlay coordinate system starts at (0,0) at top-left of frame
@@ -1925,8 +1947,8 @@ struct DraggableResizableImage: View {
     }
     
     private func edgeHandlePosition(for edge: ImageWorkbench.ResizeEdge) -> CGPoint {
-        // Use canvas size if set, otherwise use display size
-        let frameSize = doc.canvasSize ?? doc.displaySize
+        // Use displaySize for frame size
+        let frameSize = doc.displaySize
         
         // Position handles at the midpoints of each edge
         let position: CGPoint
@@ -2055,12 +2077,8 @@ struct Inspector: View {
             LabeledContent("Original") {
                 Text("\(Int(doc.original.size.width))×\(Int(doc.original.size.height))")
             }
-            LabeledContent(vm.canvasResizeMode && vm.layout == .overlay ? "Canvas" : "Current") {
-                if vm.canvasResizeMode && vm.layout == .overlay {
-                    Text("\(Int(doc.canvasSize?.width ?? doc.displaySize.width))×\(Int(doc.canvasSize?.height ?? doc.displaySize.height))")
-                } else {
-                    Text("\(Int(doc.displaySize.width))×\(Int(doc.displaySize.height))")
-                }
+            LabeledContent("Size") {
+                Text("\(Int(doc.displaySize.width))×\(Int(doc.displaySize.height))")
             }
             
             Toggle("Lock aspect", isOn: $vm.keepAspect)
@@ -2737,77 +2755,85 @@ struct PlacementCanvas: View {
                                 )
                         )
                         .overlay(
-                            // Coordinate text overlays (relative to anchor point)
-                            VStack {
-                                HStack {
-                                    // Top-left corner coordinates (relative to anchor)
-                                    VStack {
-                                        let anchorX = baseImage.anchorPoint.offset.x * baseFrameSize.width
-                                        let anchorY = baseImage.anchorPoint.offset.y * baseFrameSize.height
-                                        let topLeftX = -anchorX
-                                        let topLeftY = -anchorY
-                                        
-                                        Text("(\(Int(topLeftX)), \(Int(topLeftY)))")
-                                            .font(.caption2)
-                                            .fontWeight(.semibold)
-                                            .foregroundColor(.blue)
-                                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
-                                            .padding(2)
+                            // Coordinate text overlays (relative to anchor point) - only show when enabled
+                            Group {
+                                if vm.showCoordinates {
+                                    VStack(spacing: 0) {
+                                        HStack(spacing: 0) {
+                                            // Top-left corner coordinates (relative to anchor)
+                                            VStack(alignment: .leading, spacing: 0) {
+                                                let anchorX = baseImage.anchorPoint.offset.x * baseFrameSize.width
+                                                let anchorY = baseImage.anchorPoint.offset.y * baseFrameSize.height
+                                                let topLeftX = -anchorX
+                                                let topLeftY = -anchorY
+                                                
+                                                Text("(\(Int(topLeftX)), \(Int(topLeftY)))")
+                                                    .font(.caption2)
+                                                    .fontWeight(.semibold)
+                                                    .foregroundColor(.blue)
+                                                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                                                    .padding(4)
+                                                    .offset(x: -8, y: -8) // Position outside the frame
+                                                Spacer()
+                                            }
+                                            Spacer()
+                                            // Top-right corner coordinates (relative to anchor)
+                                            VStack(alignment: .trailing, spacing: 0) {
+                                                let anchorX = baseImage.anchorPoint.offset.x * baseFrameSize.width
+                                                let anchorY = baseImage.anchorPoint.offset.y * baseFrameSize.height
+                                                let topRightX = baseFrameSize.width - anchorX
+                                                let topRightY = -anchorY
+                                                
+                                                Text("(\(Int(topRightX)), \(Int(topRightY)))")
+                                                    .font(.caption2)
+                                                    .fontWeight(.semibold)
+                                                    .foregroundColor(.blue)
+                                                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                                                    .padding(4)
+                                                    .offset(x: 8, y: -8) // Position outside the frame
+                                                Spacer()
+                                            }
+                                        }
                                         Spacer()
+                                        HStack(spacing: 0) {
+                                            // Bottom-left corner coordinates (relative to anchor)
+                                            VStack(alignment: .leading, spacing: 0) {
+                                                Spacer()
+                                                let anchorX = baseImage.anchorPoint.offset.x * baseFrameSize.width
+                                                let anchorY = baseImage.anchorPoint.offset.y * baseFrameSize.height
+                                                let bottomLeftX = -anchorX
+                                                let bottomLeftY = baseFrameSize.height - anchorY
+                                                
+                                                Text("(\(Int(bottomLeftX)), \(Int(bottomLeftY)))")
+                                                    .font(.caption2)
+                                                    .fontWeight(.semibold)
+                                                    .foregroundColor(.blue)
+                                                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                                                    .padding(4)
+                                                    .offset(x: -8, y: 8) // Position outside the frame
+                                            }
+                                            Spacer()
+                                            // Bottom-right corner coordinates (relative to anchor)
+                                            VStack(alignment: .trailing, spacing: 0) {
+                                                Spacer()
+                                                let anchorX = baseImage.anchorPoint.offset.x * baseFrameSize.width
+                                                let anchorY = baseImage.anchorPoint.offset.y * baseFrameSize.height
+                                                let bottomRightX = baseFrameSize.width - anchorX
+                                                let bottomRightY = baseFrameSize.height - anchorY
+                                                
+                                                Text("(\(Int(bottomRightX)), \(Int(bottomRightY)))")
+                                                    .font(.caption2)
+                                                    .fontWeight(.semibold)
+                                                    .foregroundColor(.blue)
+                                                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                                                    .padding(4)
+                                                    .offset(x: 8, y: 8) // Position outside the frame
+                                            }
+                                        }
                                     }
-                                    Spacer()
-                                    // Top-right corner coordinates (relative to anchor)
-                                    VStack {
-                                        let anchorX = baseImage.anchorPoint.offset.x * baseFrameSize.width
-                                        let anchorY = baseImage.anchorPoint.offset.y * baseFrameSize.height
-                                        let topRightX = baseFrameSize.width - anchorX
-                                        let topRightY = -anchorY
-                                        
-                                        Text("(\(Int(topRightX)), \(Int(topRightY)))")
-                                            .font(.caption2)
-                                            .fontWeight(.semibold)
-                                            .foregroundColor(.blue)
-                                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
-                                            .padding(2)
-                                        Spacer()
-                                    }
-                                }
-                                Spacer()
-                                HStack {
-                                    // Bottom-left corner coordinates (relative to anchor)
-                                    VStack {
-                                        Spacer()
-                                        let anchorX = baseImage.anchorPoint.offset.x * baseFrameSize.width
-                                        let anchorY = baseImage.anchorPoint.offset.y * baseFrameSize.height
-                                        let bottomLeftX = -anchorX
-                                        let bottomLeftY = baseFrameSize.height - anchorY
-                                        
-                                        Text("(\(Int(bottomLeftX)), \(Int(bottomLeftY)))")
-                                            .font(.caption2)
-                                            .fontWeight(.semibold)
-                                            .foregroundColor(.blue)
-                                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
-                                            .padding(2)
-                                    }
-                                    Spacer()
-                                    // Bottom-right corner coordinates (relative to anchor)
-                                    VStack {
-                                        Spacer()
-                                        let anchorX = baseImage.anchorPoint.offset.x * baseFrameSize.width
-                                        let anchorY = baseImage.anchorPoint.offset.y * baseFrameSize.height
-                                        let bottomRightX = baseFrameSize.width - anchorX
-                                        let bottomRightY = baseFrameSize.height - anchorY
-                                        
-                                        Text("(\(Int(bottomRightX)), \(Int(bottomRightY)))")
-                                            .font(.caption2)
-                                            .fontWeight(.semibold)
-                                            .foregroundColor(.blue)
-                                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
-                                            .padding(2)
-                                    }
+                                    .frame(width: baseFrameSize.width, height: baseFrameSize.height)
                                 }
                             }
-                            .frame(width: baseFrameSize.width, height: baseFrameSize.height)
                         )
                         .overlay(
                             VStack {
